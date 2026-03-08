@@ -1,9 +1,13 @@
 package strongbox
 
+import "strings"
+
 // AutoFillMessageType corresponds to the message type enum used by the browser extension.
 type AutoFillMessageType int
 
 const (
+	// MessageTypeUnknown represents an unknown message type.
+	MessageTypeUnknown AutoFillMessageType = -1
 	// MessageTypeStatus is used to get the status of the Strongbox server and the list of available databases.
 	MessageTypeStatus AutoFillMessageType = iota
 	// MessageTypeSearch is used to search for entries across all unlocked databases.
@@ -37,6 +41,46 @@ const (
 	// MessageTypeCopyString is used to copy an arbitrary string to the clipboard via Strongbox.
 	MessageTypeCopyString
 )
+
+var messageTypeNames = map[AutoFillMessageType][]string{
+	MessageTypeStatus:                {"status"},
+	MessageTypeSearch:                {"search"},
+	MessageTypeGetCredentialsForURL:  {"getcredentialsforurl", "get-url"},
+	MessageTypeCopyField:             {"copyfield", "copy-field"},
+	MessageTypeLock:                  {"lock"},
+	MessageTypeUnlock:                {"unlock"},
+	MessageTypeCreateEntry:           {"createentry", "create-entry"},
+	MessageTypeGetGroups:             {"getgroups", "get-groups"},
+	MessageTypeGetNewEntryDefaults:   {"getnewentrydefaults", "get-defaults"},
+	MessageTypeGeneratePassword:      {"generatepassword", "generate-password"},
+	MessageTypeGetIcon:               {"geticon", "get-icon"},
+	MessageTypeGeneratePasswordV2:    {"generatepasswordv2", "generate-password-v2"},
+	MessageTypeGetPasswordStrength:   {"getpasswordstrength", "password-strength"},
+	MessageTypeGetNewEntryDefaultsV2: {"getnewentrydefaultsv2", "get-defaults-v2"},
+	MessageTypeGetFavourites:         {"getfavourites", "get-favourites"},
+	MessageTypeCopyString:            {"copystring", "copy-string"},
+}
+
+// String returns the canonical name of the message type.
+func (m AutoFillMessageType) String() string {
+	if names, ok := messageTypeNames[m]; ok && len(names) > 0 {
+		return names[0]
+	}
+	return "unknown"
+}
+
+// ParseMessageType parses a message type from its name (case-insensitive).
+func ParseMessageType(name string) (AutoFillMessageType, bool) {
+	name = strings.ToLower(name)
+	for m, names := range messageTypeNames {
+		for _, n := range names {
+			if n == name {
+				return m, true
+			}
+		}
+	}
+	return MessageTypeUnknown, false
+}
 
 // WellKnownField corresponds to the standard credential fields.
 type WellKnownField int

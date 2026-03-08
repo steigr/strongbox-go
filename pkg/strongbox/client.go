@@ -52,6 +52,10 @@ func NewClient(opts ...Option) (*Client, error) {
 
 // sendRaw sends a single native-messaging request and returns the raw response.
 // Each call spawns a new afproxy process (matching browser native messaging behavior).
+func (c *Client) SendRaw(request any) (*EncryptedResponse, error) {
+	return c.sendRaw(request)
+}
+
 func (c *Client) sendRaw(request any) (*EncryptedResponse, error) {
 	reqBytes, err := json.Marshal(request)
 	if err != nil {
@@ -153,6 +157,10 @@ func (c *Client) ensureServerPublicKey() error {
 	return err
 }
 
+func (c *Client) BuildEncryptedRequest(innerRequest any, msgType AutoFillMessageType) (*EncryptedRequest, error) {
+	return c.buildEncryptedRequest(innerRequest, msgType)
+}
+
 func (c *Client) buildEncryptedRequest(innerRequest any, msgType AutoFillMessageType) (*EncryptedRequest, error) {
 	if err := c.ensureServerPublicKey(); err != nil {
 		return nil, fmt.Errorf("ensuring server public key: %w", err)
@@ -180,6 +188,10 @@ func (c *Client) buildEncryptedRequest(innerRequest any, msgType AutoFillMessage
 		Nonce:           base64.StdEncoding.EncodeToString(nonce[:]),
 		Message:         base64.StdEncoding.EncodeToString(encrypted),
 	}, nil
+}
+
+func (c *Client) SendEncrypted(innerRequest any, msgType AutoFillMessageType, result any) error {
+	return c.sendEncrypted(innerRequest, msgType, result)
 }
 
 func (c *Client) sendEncrypted(innerRequest any, msgType AutoFillMessageType, result any) error {
