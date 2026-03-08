@@ -2,15 +2,35 @@
 
 A Go library and CLI for interfacing with [Strongbox](https://strongboxsafe.com) via its native messaging protocol, the same protocol used by the [browser autofill extension](https://github.com/strongbox-password-safe/browser-autofill).
 
+## Features
+
+- 🔐 **Secure Communication**: Uses NaCl box encryption (Curve25519, XSalsa20, Poly1305)
+- 🔍 **Search & Retrieve**: Search credentials across all unlocked databases
+- ➕ **Create Entries**: Programmatically create new password entries
+- 🎲 **Password Generation**: Generate secure passwords using Strongbox's generator
+- 📋 **Clipboard Integration**: Copy credentials securely to clipboard
+- 🔒 **Database Management**: Lock and unlock databases
+- 🔄 **Concurrent-Safe**: Thread-safe client for concurrent operations
+- 📦 **Zero Dependencies**: Pure Go implementation with minimal external dependencies
+
 ## Requirements
 
 - macOS with [Strongbox](https://strongboxsafe.com) installed (`/Applications/Strongbox.app`)
-- Go 1.26+
+- Go 1.24+
 
 ## Installation
 
+### As a Library
+
+```bash
+go get github.com/steigr/strongbox-go/pkg/strongbox
+```
+
+### CLI Tools
+
 ```bash
 go install github.com/steigr/strongbox-go/cmd/strongbox@latest
+go install github.com/steigr/strongbox-go/cmd/afproxy-cli@latest
 ```
 
 Or build from source:
@@ -18,10 +38,139 @@ Or build from source:
 ```bash
 git clone https://github.com/steigr/strongbox-go.git
 cd strongbox-go
-go build -o strongbox ./cmd/strongbox
+go build -o bin/strongbox ./cmd/strongbox
+go build -o bin/afproxy-cli ./cmd/afproxy-cli
+```
+
+## Library Usage
+
+### Quick Start
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    "github.com/steigr/strongbox-go/pkg/strongbox"
+)
+
+func main() {
+    // Create a new client
+    client, err := strongbox.NewClient()
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Get database status
+    status, err := client.GetStatus()
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Printf("Strongbox version: %s\n", status.ServerVersionInfo)
+    fmt.Printf("Databases: %d\n", len(status.Databases))
+
+    // Search for credentials
+    results, err := client.Search("github", 0, 10)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for _, cred := range results.Results {
+        fmt.Printf("%s: %s@%s\n", cred.Title, cred.Username, cred.URL)
+    }
+}
+```
+
+### Common Operations
+
+#### Searching for Credentials
+
+```go
+// Search with pagination
+results, err := client.Search("example.com", 0, 10)
+
+// Fetch all results (automatic pagination)
+allResults, err := client.Search("example.com", 0, -1)
+```
+
+#### Getting Credentials by URL
+
+```go
+results, err := client.CredentialsForURL("https://github.com", 0, 10)
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, cred := range results.Results {
+    fmt.Printf("Username: %s\n", cred.Username)
+    fmt.Printf("Password: %s\n", cred.Password)
+}
+```
+
+#### Creating New Entries
+
+```go
+// Get default values first
+defaults, err := client.GetNewEntryDefaultsV2(databaseID)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Create the entry
+title := "My New Account"
+username := "user@example.com"
+password := defaults.Password.Password  // Use generated password
+url := "https://example.com"
+
+result, err := client.CreateEntry(&strongbox.CreateEntryRequest{
+    DatabaseID: databaseID,
+    Title:      &title,
+    Username:   &username,
+    Password:   &password,
+    URL:        &url,
+})
+```
+
+#### Generating Passwords
+
+```go
+// Basic generation
+pwd, err := client.GeneratePassword()
+
+// With strength analysis
+pwdV2, err := client.GeneratePasswordV2()
+fmt.Printf("Password: %s (Strength: %s, %.2f bits)\n",
+    pwdV2.Password.Password,
+    pwdV2.Password.Strength.Category,
+    pwdV2.Password.Strength.Entropy)
+```
+
+#### Copying to Clipboard
+
+```go
+// Copy password
+result, err := client.CopyField(databaseID, nodeID, strongbox.FieldPassword, false)
+
+// Copy TOTP code
+result, err := client.CopyField(databaseID, nodeID, strongbox.FieldTOTP, true)
+```
+
+### Documentation
+
+Full API documentation is available on [pkg.go.dev](https://pkg.go.dev/github.com/steigr/strongbox-go/pkg/strongbox).
+
+View local documentation:
+
+```bash
+go doc -all github.com/steigr/strongbox-go/pkg/strongbox
 ```
 
 ## CLI Usage
+
+### Status and Database Info
 
 ```bash
 # Show status and databases

@@ -17,6 +17,13 @@ import (
 // on macOS. This binary is used to communicate with the Strongbox Password Manager application.
 const defaultProxyPath = "/Applications/Strongbox.app/Contents/MacOS/afproxy"
 
+// transport is the internal interface for sending a raw native-messaging request.
+// The default implementation spawns an afproxy process. Tests can substitute a mock
+// via WithTransport.
+type transport interface {
+	sendRaw(request any) (*EncryptedResponse, error)
+}
+
 // Client communicates with the Strongbox native messaging host (afproxy) using the browser
 // extension protocol. It handles encryption/decryption of messages using NaCl box encryption
 // and manages the lifecycle of afproxy processes.
@@ -27,6 +34,9 @@ const defaultProxyPath = "/Applications/Strongbox.app/Contents/MacOS/afproxy"
 type Client struct {
 	// proxyPath is the filesystem path to the afproxy binary
 	proxyPath string
+
+	// transport is the pluggable I/O backend (defaults to afproxyTransport)
+	transport transport
 
 	// mu protects the client's cryptographic state (keys)
 	mu sync.Mutex
@@ -49,6 +59,12 @@ type Option func(*Client)
 //	client, err := strongbox.NewClient(strongbox.WithProxyPath("/custom/path/to/afproxy"))
 func WithProxyPath(path string) Option {
 	return func(c *Client) { c.proxyPath = path }
+}
+
+// WithTransport sets a custom transport for the client.
+// This is primarily useful for testing, allowing you to mock the afproxy communication.
+func WithTransport(t transport) Option {
+	return func(c *Client) { c.transport = t }
 }
 
 // NewClient creates a new Strongbox client with the specified options.
@@ -83,6 +99,10 @@ func NewClient(opts ...Option) (*Client, error) {
 	for _, o := range opts {
 		o(c)
 	}
+	// Default transport: spawn afproxy processes
+	if c.transport == nil {
+		c.transport = &afproxyTransport{proxyPath: c.proxyPath}
+	}
 	return c, nil
 }
 
@@ -100,12 +120,21 @@ func (c *Client) SendRaw(request any) (*EncryptedResponse, error) {
 }
 
 func (c *Client) sendRaw(request any) (*EncryptedResponse, error) {
+	return c.transport.sendRaw(request)
+}
+
+// afproxyTransport is the default transport that spawns an afproxy process for each request.
+type afproxyTransport struct {
+	proxyPath string
+}
+
+func (t *afproxyTransport) sendRaw(request any) (*EncryptedResponse, error) {
 	reqBytes, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	cmd := exec.Command(c.proxyPath)
+	cmd := exec.Command(t.proxyPath)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("creating stdin pipe: %w", err)
