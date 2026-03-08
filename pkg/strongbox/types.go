@@ -1,7 +1,5 @@
 package strongbox
 
-import "encoding/json"
-
 // AutoFillMessageType corresponds to the message type enum used by the browser extension.
 type AutoFillMessageType int
 
@@ -100,22 +98,29 @@ type DatabaseSummary struct {
 	IncludeFavIconForNewEntries bool `json:"includeFavIconForNewEntries"`
 }
 
+// CustomField represents a custom field in a Strongbox entry.
+type CustomField struct {
+	Key         string `json:"key"`
+	Value       string `json:"value"`
+	Concealable bool   `json:"concealable"`
+}
+
 // AutoFillCredential represents a single credential entry from Strongbox.
 type AutoFillCredential struct {
-	DatabaseID   string          `json:"databaseId"`
-	UUID         string          `json:"uuid"`
-	Title        string          `json:"title"`
-	Username     string          `json:"username"`
-	Password     string          `json:"password"`
-	URL          string          `json:"url"`
-	TOTP         string          `json:"totp"`
-	Icon         string          `json:"icon"`
-	CustomFields json.RawMessage `json:"customFields"`
-	DatabaseName string          `json:"databaseName"`
-	Tags         []string        `json:"tags"`
-	Favourite    bool            `json:"favourite"`
-	Notes        string          `json:"notes"`
-	Modified     string          `json:"modified"`
+	DatabaseID   string        `json:"databaseId"`
+	UUID         string        `json:"uuid"`
+	Title        string        `json:"title"`
+	Username     string        `json:"username"`
+	Password     string        `json:"password"`
+	URL          string        `json:"url"`
+	TOTP         string        `json:"totp"`
+	Icon         string        `json:"icon"`
+	CustomFields []CustomField `json:"customFields"`
+	DatabaseName string        `json:"databaseName"`
+	Tags         []string      `json:"tags"`
+	Favourite    bool          `json:"favourite"`
+	Notes        string        `json:"notes"`
+	Modified     string        `json:"modified"`
 }
 
 type CredentialsForURLRequest struct {
