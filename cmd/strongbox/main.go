@@ -414,31 +414,46 @@ func printPretty(v any, privacy bool) bool {
 		return true
 
 	case *strongbox.AutoFillCredential:
-		fmt.Fprintf(w, "Title:\t%s\n", res.Title)
-		fmt.Fprintf(w, "Username:\t%s\n", res.Username)
-		fmt.Fprintf(w, "Password:\t%s\n", res.Password)
-		fmt.Fprintf(w, "URL:\t%s\n", res.URL)
-		fmt.Fprintf(w, "TOTP:\t%s\n", res.TOTP)
-		fmt.Fprintf(w, "UUID:\t%s\n", res.UUID)
-		fmt.Fprintf(w, "Database:\t%s\n", res.DatabaseName)
-		fmt.Fprintf(w, "Modified:\t%s\n", res.Modified)
-		if len(res.CustomFields) > 0 {
-			fmt.Fprintln(w, "Custom Fields:")
-			for _, f := range res.CustomFields {
-				fmt.Fprintf(w, "  %s:\t%s\n", f.Key, f.Value)
-			}
-		}
-		if len(res.Tags) > 0 {
-			fmt.Fprintf(w, "Tags:\t%s\n", strings.Join(res.Tags, ", "))
-		}
-		if res.Notes != "" {
-			fmt.Fprintf(w, "Notes:\t%s\n", res.Notes)
-		}
-		w.Flush()
-		return true
+		return printPrettyCredential(*res, privacy, w)
+	case strongbox.AutoFillCredential:
+		return printPrettyCredential(res, privacy, w)
 	}
 
 	return false
+}
+
+func printPrettyCredential(res strongbox.AutoFillCredential, privacy bool, w *tabwriter.Writer) bool {
+	fmt.Fprintf(w, "Title:\t%s\n", res.Title)
+	fmt.Fprintf(w, "Username:\t%s\n", res.Username)
+	fmt.Fprintf(w, "Password:\t%s\n", res.Password)
+	fmt.Fprintf(w, "URL:\t%s\n", res.URL)
+	fmt.Fprintf(w, "TOTP:\t%s\n", res.TOTP)
+	fmt.Fprintf(w, "UUID:\t%s\n", res.UUID)
+	fmt.Fprintf(w, "Database:\t%s\n", res.DatabaseName)
+	fmt.Fprintf(w, "Modified:\t%s\n", res.Modified)
+	if len(res.CustomFields) > 0 {
+		fmt.Fprintln(w, "Custom Fields:")
+		for _, f := range res.CustomFields {
+			fmt.Fprintf(w, "  %s:\t%s\n", f.Key, f.Value)
+		}
+	}
+	if len(res.Tags) > 0 {
+		fmt.Fprintf(w, "Tags:\t%s\n", strings.Join(res.Tags, ", "))
+	}
+	if res.Notes != "" {
+		fmt.Fprint(w, "Notes:")
+		lines := strings.Split(res.Notes, "\n")
+		if len(lines) == 1 {
+			fmt.Fprintf(w, "\t%s\n", lines[0])
+		} else {
+			fmt.Fprint(w, "\n")
+			for _, line := range lines {
+				fmt.Fprintf(w, "  %s\n", line)
+			}
+		}
+	}
+	w.Flush()
+	return true
 }
 
 func transformForOutput(v any, privacy bool) any {
@@ -762,7 +777,11 @@ func main() {
 			printField(entry, fieldName)
 		} else {
 			probeTerminal()
-			printResult(result, true)
+			if len(result.Results) == 1 {
+				printResult(result.Results[0], true)
+			} else {
+				printResult(result, true)
+			}
 		}
 
 	case "get":
