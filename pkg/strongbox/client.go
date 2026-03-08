@@ -224,8 +224,11 @@ func (c *Client) GetStatus() (*GetStatusResponse, error) {
 }
 
 // Search searches for credentials matching the query.
-// skip and take are used for pagination.
+// skip and take are used for pagination. If take is -1, it attempts to fetch all results.
 func (c *Client) Search(query string, skip, take int) (*SearchResponse, error) {
+	if take == -1 {
+		return c.searchAll(query, skip)
+	}
 	var result SearchResponse
 	err := c.sendEncrypted(&SearchRequest{Query: query, Skip: skip, Take: take}, MessageTypeSearch, &result)
 	if err != nil {
@@ -234,14 +237,73 @@ func (c *Client) Search(query string, skip, take int) (*SearchResponse, error) {
 	return &result, nil
 }
 
+func (c *Client) searchAll(query string, skip int) (*SearchResponse, error) {
+	const chunkSize = 100
+	var allResults []AutoFillCredential
+	currentSkip := skip
+
+	for {
+		result, err := c.Search(query, currentSkip, chunkSize)
+		if err != nil {
+			return nil, err
+		}
+		if len(result.Results) == 0 {
+			break
+		}
+		allResults = append(allResults, result.Results...)
+		if len(result.Results) < chunkSize {
+			// If we got fewer than requested, we've likely hit the end or an internal limit
+			// To be sure, we check if the next page is empty in the next iteration.
+			// However, some APIs might always return fewer than chunkSize if they have a hard internal limit.
+			// Let's assume len < chunkSize means we are done or close to it.
+		}
+		currentSkip += len(result.Results)
+
+		// Strongbox afproxy seems to have a limit around 64 or 100.
+		// If we get 0 results, we are definitely done.
+	}
+
+	return &SearchResponse{Results: allResults}, nil
+}
+
 // CredentialsForURL retrieves credentials matching the given URL.
+// If take is -1, it attempts to fetch all results.
 func (c *Client) CredentialsForURL(url string, skip, take int) (*CredentialsForURLResponse, error) {
+	if take == -1 {
+		return c.credentialsForURLAll(url, skip)
+	}
 	var result CredentialsForURLResponse
 	err := c.sendEncrypted(&CredentialsForURLRequest{URL: url, Skip: skip, Take: take}, MessageTypeGetCredentialsForURL, &result)
 	if err != nil {
 		return nil, err
 	}
 	return &result, nil
+}
+
+func (c *Client) credentialsForURLAll(url string, skip int) (*CredentialsForURLResponse, error) {
+	const chunkSize = 100
+	var allResults []AutoFillCredential
+	var lastResponse *CredentialsForURLResponse
+	currentSkip := skip
+
+	for {
+		result, err := c.CredentialsForURL(url, currentSkip, chunkSize)
+		if err != nil {
+			return nil, err
+		}
+		lastResponse = result
+		if len(result.Results) == 0 {
+			break
+		}
+		allResults = append(allResults, result.Results...)
+		currentSkip += len(result.Results)
+	}
+
+	if lastResponse == nil {
+		return &CredentialsForURLResponse{Results: allResults}, nil
+	}
+	lastResponse.Results = allResults
+	return lastResponse, nil
 }
 
 // CopyField copies a specific field of an entry to the clipboard.

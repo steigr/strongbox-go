@@ -11,6 +11,7 @@ import (
 	_ "image/png"
 	"io"
 	"math"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -28,7 +29,9 @@ func usage() {
 
 Global Flags:
   -U, --unlock <true|false|try>       Control automatic database unlocking (default: try)
-  -o, --output <pretty|json|yaml|csv|tsv> Output format (default: pretty)
+  -o, --output <pretty|wide|json|yaml|csv|tsv> Output format (default: pretty)
+  --skip <N>                          Number of results to skip (default: 0)
+  --take <N>                          Number of results to take (default: -1 for all)
 
 Commands:
   status                              Show Strongbox status and databases
@@ -80,6 +83,7 @@ type OutputFormat int
 
 const (
 	OutputFormatPretty OutputFormat = iota
+	OutputFormatWide
 	OutputFormatJSON
 	OutputFormatYAML
 	OutputFormatCSV
@@ -179,6 +183,121 @@ func probeTerminal() {
 		(strings.Contains(response, ";4;") || strings.Contains(response, ";4c") || strings.Contains(response, "?4;") || strings.Contains(response, "?4c")) {
 		terminalImageSupport = ImageSupportSixel
 	}
+}
+
+func shortenURL(urlStr string) string {
+	if urlStr == "" {
+		return ""
+	}
+
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		// Fallback to simple truncation if not a valid URL
+		if len(urlStr) > 63 {
+			return urlStr[:30] + "..." + urlStr[len(urlStr)-30:]
+		}
+		return urlStr
+	}
+
+	host := u.Host
+	if host != "" {
+		parts := strings.Split(host, ".")
+		if len(parts) > 3 {
+			newParts := make([]string, len(parts))
+			copy(newParts, parts)
+			for i := 1; i < len(parts)-2; i++ {
+				if len(parts[i]) > 0 {
+					newParts[i] = string(parts[i][0]) + "*"
+				}
+			}
+			host = strings.Join(newParts, ".")
+		}
+	}
+
+	path := u.Path
+	if path != "" {
+		trimmedPath := strings.Trim(path, "/")
+		if trimmedPath != "" {
+			parts := strings.Split(trimmedPath, "/")
+			if len(parts) > 3 {
+				newParts := make([]string, len(parts))
+				for i, p := range parts {
+					if len(p) > 0 {
+						newParts[i] = string(p[0])
+					} else {
+						newParts[i] = p
+					}
+				}
+				path = "/" + strings.Join(newParts, "/")
+				if strings.HasSuffix(u.Path, "/") {
+					path += "/"
+				}
+			}
+		}
+	}
+
+	query := u.RawQuery
+	if query != "" {
+		parts := strings.Split(query, "&")
+		if len(parts) > 3 {
+			newParts := make([]string, len(parts))
+			for i, p := range parts {
+				if len(p) > 0 {
+					newParts[i] = string(p[0])
+				} else {
+					newParts[i] = p
+				}
+			}
+			query = strings.Join(newParts, "&")
+		}
+	}
+
+	fragment := u.Fragment
+	if fragment != "" {
+		// Assuming fragments might have parts separated by something, but usually not standard.
+		// If it's just a string, we might not have "parts".
+		// But let's apply a similar "length" logic if it looks like it has parts (e.g. / or -)
+		sep := ""
+		if strings.Contains(fragment, "/") {
+			sep = "/"
+		} else if strings.Contains(fragment, "-") {
+			sep = "-"
+		}
+
+		if sep != "" {
+			parts := strings.Split(fragment, sep)
+			if len(parts) > 3 {
+				newParts := make([]string, len(parts))
+				for i, p := range parts {
+					if len(p) > 0 {
+						newParts[i] = string(p[0])
+					} else {
+						newParts[i] = p
+					}
+				}
+				fragment = strings.Join(newParts, sep)
+			}
+		}
+	}
+
+	// Reconstruct URL
+	res := ""
+	if u.Scheme != "" {
+		res += u.Scheme + "://"
+	}
+	res += host
+	res += path
+	if query != "" {
+		res += "?" + query
+	}
+	if fragment != "" {
+		res += "#" + fragment
+	}
+
+	if len(res) > 63 {
+		return res[:30] + "..." + res[len(res)-30:]
+	}
+	return res
 }
 
 func calculateEntropy(s string) float64 {
@@ -311,6 +430,13 @@ func printResult(v any, privacy bool) {
 		// fallback if pretty print not implemented for this type
 	}
 
+	if outputFormat == OutputFormatWide {
+		if printWide(v, privacy) {
+			return
+		}
+		// fallback if wide print not implemented for this type
+	}
+
 	switch outputFormat {
 	case OutputFormatJSON:
 		printJSON(v, privacy)
@@ -396,7 +522,7 @@ func printPretty(v any, privacy bool) bool {
 		}
 		fmt.Fprintln(w, "TITLE\tUSERNAME\tURL\tDATABASE\tMODIFIED")
 		for _, c := range res.Results {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", c.Title, c.Username, c.URL, c.DatabaseName, c.Modified)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", c.Title, c.Username, shortenURL(c.URL), c.DatabaseName, c.Modified)
 		}
 		w.Flush()
 		return true
@@ -408,7 +534,7 @@ func printPretty(v any, privacy bool) bool {
 		}
 		fmt.Fprintln(w, "TITLE\tUSERNAME\tURL\tDATABASE\tMODIFIED")
 		for _, c := range res.Results {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", c.Title, c.Username, c.URL, c.DatabaseName, c.Modified)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", c.Title, c.Username, shortenURL(c.URL), c.DatabaseName, c.Modified)
 		}
 		w.Flush()
 		return true
@@ -422,11 +548,70 @@ func printPretty(v any, privacy bool) bool {
 	return false
 }
 
+func printWide(v any, privacy bool) bool {
+	v = transformForOutput(v, privacy)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+
+	switch res := v.(type) {
+	case *strongbox.SearchResponse:
+		if len(res.Results) == 0 {
+			fmt.Println("No results found.")
+			return true
+		}
+		fmt.Fprintln(w, "TITLE\tUSERNAME\tURL\tDATABASE\tMODIFIED\tTOTP\tENTROPY(U/P/CF)")
+		for _, c := range res.Results {
+			totp := "No"
+			if c.TOTP != "" {
+				totp = "Yes"
+			}
+			cfEntropy := 0.0
+			for _, f := range c.CustomFields {
+				cfEntropy += calculateEntropy(f.Value)
+			}
+			entropy := fmt.Sprintf("%.1f/%.1f/%.1f", calculateEntropy(c.Username), calculateEntropy(c.Password), cfEntropy)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Title, c.Username, shortenURL(c.URL), c.DatabaseName, c.Modified, totp, entropy)
+		}
+		w.Flush()
+		return true
+
+	case *strongbox.CredentialsForURLResponse:
+		if len(res.Results) == 0 {
+			fmt.Println("No results found.")
+			return true
+		}
+		fmt.Fprintln(w, "TITLE\tUSERNAME\tURL\tDATABASE\tMODIFIED\tTOTP\tENTROPY(U/P/CF)")
+		for _, c := range res.Results {
+			totp := "No"
+			if c.TOTP != "" {
+				totp = "Yes"
+			}
+			cfEntropy := 0.0
+			for _, f := range c.CustomFields {
+				cfEntropy += calculateEntropy(f.Value)
+			}
+			entropy := fmt.Sprintf("%.1f/%.1f/%.1f", calculateEntropy(c.Username), calculateEntropy(c.Password), cfEntropy)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", c.Title, c.Username, shortenURL(c.URL), c.DatabaseName, c.Modified, totp, entropy)
+		}
+		w.Flush()
+		return true
+
+	case *strongbox.AutoFillCredential:
+		return printPrettyCredential(*res, privacy, w)
+	case strongbox.AutoFillCredential:
+		return printPrettyCredential(res, privacy, w)
+	}
+
+	return printPretty(v, privacy)
+}
+
 func printPrettyCredential(res strongbox.AutoFillCredential, privacy bool, w *tabwriter.Writer) bool {
+	if res.Icon != "" {
+		fmt.Fprintf(w, "Icon:\t%s\n", res.Icon)
+	}
 	fmt.Fprintf(w, "Title:\t%s\n", res.Title)
 	fmt.Fprintf(w, "Username:\t%s\n", res.Username)
 	fmt.Fprintf(w, "Password:\t%s\n", res.Password)
-	fmt.Fprintf(w, "URL:\t%s\n", res.URL)
+	fmt.Fprintf(w, "URL:\t%s\n", shortenURL(res.URL))
 	fmt.Fprintf(w, "TOTP:\t%s\n", res.TOTP)
 	fmt.Fprintf(w, "UUID:\t%s\n", res.UUID)
 	fmt.Fprintf(w, "Database:\t%s\n", res.DatabaseName)
@@ -644,6 +829,8 @@ func main() {
 	}
 
 	unlockBehavior := "try"
+	skip := 0
+	take := -1
 	var cmd string
 	var args []string
 
@@ -656,11 +843,23 @@ func main() {
 			i++
 		} else if strings.HasPrefix(arg, "--unlock=") {
 			unlockBehavior = strings.TrimPrefix(arg, "--unlock=")
+		} else if arg == "--skip" && i+1 < len(rawArgs) {
+			skip = atoi(rawArgs[i+1], 0)
+			i++
+		} else if strings.HasPrefix(arg, "--skip=") {
+			skip = atoi(strings.TrimPrefix(arg, "--skip="), 0)
+		} else if arg == "--take" && i+1 < len(rawArgs) {
+			take = atoi(rawArgs[i+1], -1)
+			i++
+		} else if strings.HasPrefix(arg, "--take=") {
+			take = atoi(strings.TrimPrefix(arg, "--take="), -1)
 		} else if (arg == "-o" || arg == "--output") && i+1 < len(rawArgs) {
 			val := rawArgs[i+1]
 			switch val {
 			case "pretty":
 				outputFormat = OutputFormatPretty
+			case "wide":
+				outputFormat = OutputFormatWide
 			case "json":
 				outputFormat = OutputFormatJSON
 			case "yaml":
@@ -678,6 +877,8 @@ func main() {
 			switch val {
 			case "pretty":
 				outputFormat = OutputFormatPretty
+			case "wide":
+				outputFormat = OutputFormatWide
 			case "json":
 				outputFormat = OutputFormatJSON
 			case "yaml":
@@ -730,8 +931,6 @@ func main() {
 		ensureUnlockedDatabase(client, unlockBehavior)
 		probeTerminal()
 		query := requireArg(args, 0, "query")
-		skip := atoi(arg(args, 1), 0)
-		take := atoi(arg(args, 2), 25)
 		result, err := client.Search(query, skip, take)
 		if err != nil {
 			fatal("searching: %v", err)
@@ -761,7 +960,7 @@ func main() {
 		url := urlParts[0]
 
 		ensureUnlockedDatabase(client, unlockBehavior)
-		result, err := client.CredentialsForURL(url, 0, 100)
+		result, err := client.CredentialsForURL(url, skip, take)
 		if err != nil {
 			fatal("getting credentials: %v", err)
 		}
@@ -807,7 +1006,7 @@ func main() {
 		name := strings.Join(nameParts, " ")
 
 		ensureUnlockedDatabase(client, unlockBehavior)
-		result, err := client.Search(name, 0, 100)
+		result, err := client.Search(name, skip, take)
 		if err != nil {
 			fatal("searching for entry: %v", err)
 		}

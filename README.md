@@ -81,7 +81,7 @@ strongbox icon <database-id> <node-id>
 
 All commands support global flags:
 - `-U, --unlock <true|false|try>`: Control automatic database unlocking (default: try).
-- `-o, --output <pretty|json|yaml|csv|tsv>`: Output format (default: pretty).
+- `-o, --output <pretty|wide|json|yaml|csv|tsv>`: Output format (default: pretty).
 
 ## Library Usage
 
