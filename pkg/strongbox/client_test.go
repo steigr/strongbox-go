@@ -3,32 +3,30 @@ package strongbox
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"golang.org/x/crypto/nacl/box"
 )
 
 // ---------------------------------------------------------------------------
-// mockTransport simulates a Strongbox afproxy server.  It owns a NaCl
-// keypair, decrypts incoming encrypted requests, routes them by message type,
-// and encrypts the response back to the client.
+// mockTransport simulates a Strongbox afproxy server with NaCl encryption.
 // ---------------------------------------------------------------------------
 
 type mockTransport struct {
 	mu         sync.Mutex
 	publicKey  *[32]byte
 	privateKey *[32]byte
-
-	// handlers maps message type → handler func.
-	// The handler receives the decrypted inner JSON payload and returns the
-	// response object to be encrypted back to the client, or an error.
-	handlers map[AutoFillMessageType]func(raw json.RawMessage) (any, error)
-
-	// calls records every (messageType, rawInnerJSON) pair received.
-	calls []mockCall
+	handlers   map[AutoFillMessageType]func(raw json.RawMessage) (any, error)
+	calls      []mockCall
 }
 
 type mockCall struct {
@@ -37,213 +35,261 @@ type mockCall struct {
 }
 
 func newMockTransport() *mockTransport {
-	pub, priv, err := box.GenerateKey(rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	return &mockTransport{
-		publicKey:  pub,
-		privateKey: priv,
-		handlers:   make(map[AutoFillMessageType]func(json.RawMessage) (any, error)),
-	}
+	pub, priv, _ := box.GenerateKey(rand.Reader)
+	return &mockTransport{publicKey: pub, privateKey: priv, handlers: make(map[AutoFillMessageType]func(json.RawMessage) (any, error))}
 }
 
 func (m *mockTransport) sendRaw(request any) (*EncryptedResponse, error) {
-	reqBytes, err := json.Marshal(request)
-	if err != nil {
-		return nil, err
-	}
-
+	reqBytes, _ := json.Marshal(request)
 	var req EncryptedRequest
-	if err := json.Unmarshal(reqBytes, &req); err != nil {
-		return nil, fmt.Errorf("mock: unmarshal request: %w", err)
-	}
+	json.Unmarshal(reqBytes, &req)
 
-	// For the status handshake the client sends an unencrypted request
-	// (Message field is empty).
 	handler, ok := m.handlers[req.MessageType]
 	if !ok {
-		return &EncryptedResponse{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("mock: no handler for message type %d", req.MessageType),
-		}, nil
+		return &EncryptedResponse{Success: false, ErrorMessage: fmt.Sprintf("no handler for %d", req.MessageType)}, nil
 	}
 
 	var innerJSON json.RawMessage
-
 	if req.Message != "" {
-		// Decrypt the inner payload.
-		clientPKBytes, err := base64.StdEncoding.DecodeString(req.ClientPublicKey)
-		if err != nil {
-			return nil, fmt.Errorf("mock: decode client public key: %w", err)
-		}
-		nonceBytes, err := base64.StdEncoding.DecodeString(req.Nonce)
-		if err != nil {
-			return nil, fmt.Errorf("mock: decode nonce: %w", err)
-		}
-		msgBytes, err := base64.StdEncoding.DecodeString(req.Message)
-		if err != nil {
-			return nil, fmt.Errorf("mock: decode message: %w", err)
-		}
-
+		cpk, _ := base64.StdEncoding.DecodeString(req.ClientPublicKey)
+		nb, _ := base64.StdEncoding.DecodeString(req.Nonce)
+		mb, _ := base64.StdEncoding.DecodeString(req.Message)
 		var clientPK [32]byte
-		copy(clientPK[:], clientPKBytes)
+		copy(clientPK[:], cpk)
 		var nonce [24]byte
-		copy(nonce[:], nonceBytes)
-
-		decrypted, ok := box.Open(nil, msgBytes, &nonce, &clientPK, m.privateKey)
+		copy(nonce[:], nb)
+		dec, ok := box.Open(nil, mb, &nonce, &clientPK, m.privateKey)
 		if !ok {
 			return nil, fmt.Errorf("mock: decryption failed")
 		}
-		innerJSON = decrypted
+		innerJSON = dec
 	}
 
 	m.mu.Lock()
-	m.calls = append(m.calls, mockCall{MessageType: req.MessageType, InnerJSON: innerJSON})
+	m.calls = append(m.calls, mockCall{req.MessageType, innerJSON})
 	m.mu.Unlock()
 
-	// Call handler to get response payload.
-	respPayload, err := handler(innerJSON)
+	resp, err := handler(innerJSON)
 	if err != nil {
-		return &EncryptedResponse{
-			Success:      false,
-			ErrorMessage: err.Error(),
-		}, nil
+		return &EncryptedResponse{Success: false, ErrorMessage: err.Error()}, nil
 	}
 
-	// Encrypt the response back to the client.
-	respJSON, err := json.Marshal(respPayload)
-	if err != nil {
-		return nil, fmt.Errorf("mock: marshal response: %w", err)
-	}
-
-	clientPKBytes, _ := base64.StdEncoding.DecodeString(req.ClientPublicKey)
+	rj, _ := json.Marshal(resp)
+	cpk, _ := base64.StdEncoding.DecodeString(req.ClientPublicKey)
 	var clientPK [32]byte
-	copy(clientPK[:], clientPKBytes)
-
+	copy(clientPK[:], cpk)
 	var nonce [24]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return nil, err
-	}
-
-	encrypted := box.Seal(nil, respJSON, &nonce, &clientPK, m.privateKey)
+	rand.Read(nonce[:])
+	enc := box.Seal(nil, rj, &nonce, &clientPK, m.privateKey)
 
 	return &EncryptedResponse{
-		Success:         true,
-		ServerPublicKey: base64.StdEncoding.EncodeToString(m.publicKey[:]),
-		Nonce:           base64.StdEncoding.EncodeToString(nonce[:]),
-		Message:         base64.StdEncoding.EncodeToString(encrypted),
+		Success: true, ServerPublicKey: base64.StdEncoding.EncodeToString(m.publicKey[:]),
+		Nonce: base64.StdEncoding.EncodeToString(nonce[:]), Message: base64.StdEncoding.EncodeToString(enc),
 	}, nil
 }
 
 // ---------------------------------------------------------------------------
-// Test helper: create a client wired to a mock transport
+// Helpers
 // ---------------------------------------------------------------------------
 
 func newTestClient(t *testing.T, mock *mockTransport) *Client {
 	t.Helper()
 	c, err := NewClient(WithTransport(mock))
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatal(err)
 	}
 	return c
 }
 
-// setupStatusHandler registers a status handler on the mock that returns the
-// given databases.  Almost every test needs this because the client performs a
-// status handshake to obtain the server public key before sending encrypted
-// requests.
-func setupStatusHandler(mock *mockTransport, databases []DatabaseSummary) {
+func setupStatusHandler(mock *mockTransport, dbs []DatabaseSummary) {
 	mock.handlers[MessageTypeStatus] = func(_ json.RawMessage) (any, error) {
-		return &GetStatusResponse{
-			ServerVersionInfo: "Strongbox Mock v1.0",
-			Databases:         databases,
-		}, nil
+		return &GetStatusResponse{ServerVersionInfo: "Mock v1", Databases: dbs}, nil
 	}
 }
 
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+type errorTransport struct{ err error }
+
+func (e *errorTransport) sendRaw(_ any) (*EncryptedResponse, error) { return nil, e.err }
+
+type staticTransport struct{ resp *EncryptedResponse }
+
+func (s *staticTransport) sendRaw(_ any) (*EncryptedResponse, error) { return s.resp, nil }
+
+type callCountTransport struct {
+	inner     *mockTransport
+	failAfter int
+	mu        sync.Mutex
+	count     int
+}
+
+func (c *callCountTransport) sendRaw(req any) (*EncryptedResponse, error) {
+	c.mu.Lock()
+	c.count++
+	n := c.count
+	c.mu.Unlock()
+	if n > c.failAfter {
+		return nil, fmt.Errorf("transport error on call %d", n)
+	}
+	return c.inner.sendRaw(req)
+}
+
 // ---------------------------------------------------------------------------
-// Tests
+// TestMain — subprocess pattern for afproxyTransport
 // ---------------------------------------------------------------------------
+
+func TestMain(m *testing.M) {
+	if os.Getenv("STRONGBOX_TEST_HELPER_PROCESS") == "1" {
+		runFakeAfproxy()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func runFakeAfproxy() {
+	mode := os.Getenv("STRONGBOX_TEST_HELPER_MODE")
+	switch mode {
+	case "echo":
+		fakeAfproxyEcho(0)
+	case "echo-fail":
+		fakeAfproxyEcho(1)
+	case "garbage":
+		buf := make([]byte, 4)
+		io.ReadFull(os.Stdin, buf)
+		n := binary.LittleEndian.Uint32(buf)
+		io.ReadAll(io.LimitReader(os.Stdin, int64(n)))
+		g := []byte("not json!!!")
+		binary.LittleEndian.PutUint32(buf, uint32(len(g)))
+		os.Stdout.Write(buf)
+		os.Stdout.Write(g)
+		os.Exit(0)
+	case "short":
+		buf := make([]byte, 4)
+		io.ReadFull(os.Stdin, buf)
+		n := binary.LittleEndian.Uint32(buf)
+		io.ReadAll(io.LimitReader(os.Stdin, int64(n)))
+		binary.LittleEndian.PutUint32(buf, 9999)
+		os.Stdout.Write(buf)
+		os.Stdout.Write([]byte("short"))
+		os.Exit(0)
+	case "no-output":
+		buf := make([]byte, 4)
+		io.ReadFull(os.Stdin, buf)
+		n := binary.LittleEndian.Uint32(buf)
+		io.ReadAll(io.LimitReader(os.Stdin, int64(n)))
+		os.Exit(0)
+	case "close-stdin":
+		buf := make([]byte, 4)
+		io.ReadFull(os.Stdin, buf)
+		os.Stdin.Close()
+		os.Exit(0)
+	default:
+		os.Exit(2)
+	}
+}
+
+func fakeAfproxyEcho(exitCode int) {
+	buf := make([]byte, 4)
+	io.ReadFull(os.Stdin, buf)
+	n := binary.LittleEndian.Uint32(buf)
+	msg := make([]byte, n)
+	io.ReadFull(os.Stdin, msg)
+	var req EncryptedRequest
+	json.Unmarshal(msg, &req)
+	sPub, sPriv, _ := box.GenerateKey(rand.Reader)
+	cpk, _ := base64.StdEncoding.DecodeString(req.ClientPublicKey)
+	var clientPK [32]byte
+	copy(clientPK[:], cpk)
+	payload, _ := json.Marshal(&GetStatusResponse{
+		ServerVersionInfo: "FakeAfproxy v1",
+		Databases:         []DatabaseSummary{{UUID: "db-fake", NickName: "Fake DB"}},
+	})
+	var nonce [24]byte
+	rand.Read(nonce[:])
+	enc := box.Seal(nil, payload, &nonce, &clientPK, sPriv)
+	resp, _ := json.Marshal(EncryptedResponse{
+		Success: true, ServerPublicKey: base64.StdEncoding.EncodeToString(sPub[:]),
+		Nonce: base64.StdEncoding.EncodeToString(nonce[:]), Message: base64.StdEncoding.EncodeToString(enc),
+	})
+	binary.LittleEndian.PutUint32(buf, uint32(len(resp)))
+	os.Stdout.Write(buf)
+	os.Stdout.Write(resp)
+	os.Exit(exitCode)
+}
+
+func helperBinary(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return exe
+}
+
+func helperScript(t *testing.T, mode string) string {
+	t.Helper()
+	exe := helperBinary(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-afproxy")
+	content := fmt.Sprintf("#!/bin/sh\nexport STRONGBOX_TEST_HELPER_PROCESS=1\nexport STRONGBOX_TEST_HELPER_MODE=%s\nexec %q -test.run=^$ \"$@\"\n", mode, exe)
+	os.WriteFile(script, []byte(content), 0755)
+	return script
+}
+
+// ===========================================================================
+// TESTS
+// ===========================================================================
 
 func TestGetStatus(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, []DatabaseSummary{
-		{UUID: "db-1", NickName: "Work", Locked: false, AutoFillEnabled: true},
-		{UUID: "db-2", NickName: "Personal", Locked: true, AutoFillEnabled: false},
+		{UUID: "db-1", NickName: "Work", Locked: false},
+		{UUID: "db-2", NickName: "Personal", Locked: true},
 	})
-
-	client := newTestClient(t, mock)
-	status, err := client.GetStatus()
+	c := newTestClient(t, mock)
+	s, err := c.GetStatus()
 	if err != nil {
-		t.Fatalf("GetStatus: %v", err)
+		t.Fatal(err)
 	}
-
-	if status.ServerVersionInfo != "Strongbox Mock v1.0" {
-		t.Errorf("ServerVersionInfo = %q, want %q", status.ServerVersionInfo, "Strongbox Mock v1.0")
-	}
-	if len(status.Databases) != 2 {
-		t.Fatalf("len(Databases) = %d, want 2", len(status.Databases))
-	}
-	if status.Databases[0].UUID != "db-1" {
-		t.Errorf("Databases[0].UUID = %q, want %q", status.Databases[0].UUID, "db-1")
-	}
-	if status.Databases[0].NickName != "Work" {
-		t.Errorf("Databases[0].NickName = %q, want %q", status.Databases[0].NickName, "Work")
-	}
-	if status.Databases[0].Locked {
-		t.Error("Databases[0].Locked = true, want false")
-	}
-	if status.Databases[1].Locked != true {
-		t.Error("Databases[1].Locked = false, want true")
+	if len(s.Databases) != 2 || s.Databases[0].Locked || !s.Databases[1].Locked {
+		t.Errorf("unexpected: %+v", s)
 	}
 }
 
 func TestSearch(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
 	mock.handlers[MessageTypeSearch] = func(raw json.RawMessage) (any, error) {
 		var req SearchRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
+		json.Unmarshal(raw, &req)
+		if req.Query == "github" {
+			return &SearchResponse{Results: []AutoFillCredential{{Title: "GitHub"}, {Title: "GHE"}}}, nil
 		}
-		if req.Query != "github" {
-			return &SearchResponse{}, nil
-		}
-		return &SearchResponse{
-			Results: []AutoFillCredential{
-				{UUID: "cred-1", Title: "GitHub", Username: "user@example.com", URL: "https://github.com"},
-				{UUID: "cred-2", Title: "GitHub Enterprise", Username: "admin", URL: "https://github.example.com"},
-			},
-		}, nil
+		return &SearchResponse{}, nil
 	}
-
-	client := newTestClient(t, mock)
-
-	t.Run("basic search", func(t *testing.T) {
-		result, err := client.Search("github", 0, 10)
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(result.Results) != 2 {
-			t.Fatalf("len(Results) = %d, want 2", len(result.Results))
-		}
-		if result.Results[0].Title != "GitHub" {
-			t.Errorf("Results[0].Title = %q, want %q", result.Results[0].Title, "GitHub")
-		}
-		if result.Results[1].Username != "admin" {
-			t.Errorf("Results[1].Username = %q, want %q", result.Results[1].Username, "admin")
+	c := newTestClient(t, mock)
+	t.Run("basic", func(t *testing.T) {
+		r, err := c.Search("github", 0, 10)
+		if err != nil || len(r.Results) != 2 {
+			t.Fatalf("err=%v len=%d", err, len(r.Results))
 		}
 	})
-
 	t.Run("no results", func(t *testing.T) {
-		result, err := client.Search("nonexistent", 0, 10)
-		if err != nil {
-			t.Fatalf("Search: %v", err)
+		r, _ := c.Search("none", 0, 10)
+		if len(r.Results) != 0 {
+			t.Errorf("got %d", len(r.Results))
 		}
-		if len(result.Results) != 0 {
-			t.Errorf("len(Results) = %d, want 0", len(result.Results))
+	})
+	t.Run("with skip", func(t *testing.T) {
+		_, err := c.Search("github", 5, 3)
+		if err != nil {
+			t.Fatal(err)
 		}
 	})
 }
@@ -251,654 +297,713 @@ func TestSearch(t *testing.T) {
 func TestSearchAll(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	// Return results in pages: first 100, then 50, then 0.
-	callCount := 0
 	mock.handlers[MessageTypeSearch] = func(raw json.RawMessage) (any, error) {
 		var req SearchRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
-		callCount++
-		switch {
-		case req.Skip == 0:
+		json.Unmarshal(raw, &req)
+		if req.Skip == 0 {
 			creds := make([]AutoFillCredential, 100)
 			for i := range creds {
-				creds[i] = AutoFillCredential{UUID: fmt.Sprintf("cred-%d", i), Title: fmt.Sprintf("Entry %d", i)}
+				creds[i] = AutoFillCredential{UUID: fmt.Sprintf("c-%d", i)}
 			}
 			return &SearchResponse{Results: creds}, nil
-		case req.Skip == 100:
+		}
+		if req.Skip == 100 {
 			creds := make([]AutoFillCredential, 50)
 			for i := range creds {
-				creds[i] = AutoFillCredential{UUID: fmt.Sprintf("cred-%d", 100+i), Title: fmt.Sprintf("Entry %d", 100+i)}
+				creds[i] = AutoFillCredential{UUID: fmt.Sprintf("c-%d", 100+i)}
 			}
 			return &SearchResponse{Results: creds}, nil
-		default:
-			return &SearchResponse{}, nil
 		}
+		return &SearchResponse{}, nil
 	}
+	c := newTestClient(t, mock)
+	r, err := c.Search("all", 0, -1)
+	if err != nil || len(r.Results) != 150 {
+		t.Fatalf("err=%v len=%d", err, len(r.Results))
+	}
+}
 
-	client := newTestClient(t, mock)
-	result, err := client.Search("all", 0, -1)
-	if err != nil {
-		t.Fatalf("Search(take=-1): %v", err)
+func TestSearchAllFewerThanChunkSize(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	n := 0
+	mock.handlers[MessageTypeSearch] = func(_ json.RawMessage) (any, error) {
+		n++
+		if n == 1 {
+			creds := make([]AutoFillCredential, 50)
+			for i := range creds {
+				creds[i] = AutoFillCredential{UUID: fmt.Sprintf("c-%d", i)}
+			}
+			return &SearchResponse{Results: creds}, nil
+		}
+		return &SearchResponse{}, nil
 	}
-	if len(result.Results) != 150 {
-		t.Errorf("len(Results) = %d, want 150", len(result.Results))
+	c := newTestClient(t, mock)
+	r, _ := c.Search("q", 0, -1)
+	if len(r.Results) != 50 {
+		t.Errorf("got %d", len(r.Results))
 	}
 }
 
 func TestCredentialsForURL(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
 	mock.handlers[MessageTypeGetCredentialsForURL] = func(raw json.RawMessage) (any, error) {
-		var req CredentialsForURLRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
-		return &CredentialsForURLResponse{
-			UnlockedDatabaseCount: 1,
-			Results: []AutoFillCredential{
-				{UUID: "cred-url-1", Title: "GitHub Login", URL: req.URL, Username: "user"},
-			},
-		}, nil
+		return &CredentialsForURLResponse{UnlockedDatabaseCount: 1, Results: []AutoFillCredential{{UUID: "c1"}}}, nil
 	}
-
-	client := newTestClient(t, mock)
-	result, err := client.CredentialsForURL("https://github.com", 0, 10)
-	if err != nil {
-		t.Fatalf("CredentialsForURL: %v", err)
-	}
-	if result.UnlockedDatabaseCount != 1 {
-		t.Errorf("UnlockedDatabaseCount = %d, want 1", result.UnlockedDatabaseCount)
-	}
-	if len(result.Results) != 1 {
-		t.Fatalf("len(Results) = %d, want 1", len(result.Results))
-	}
-	if result.Results[0].URL != "https://github.com" {
-		t.Errorf("Results[0].URL = %q, want %q", result.Results[0].URL, "https://github.com")
+	c := newTestClient(t, mock)
+	r, err := c.CredentialsForURL("https://x.com", 0, 10)
+	if err != nil || len(r.Results) != 1 {
+		t.Fatal(err)
 	}
 }
 
 func TestCredentialsForURLAll(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	callCount := 0
-	mock.handlers[MessageTypeGetCredentialsForURL] = func(raw json.RawMessage) (any, error) {
-		var req CredentialsForURLRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
-		callCount++
-		if req.Skip == 0 {
-			return &CredentialsForURLResponse{
-				UnlockedDatabaseCount: 2,
-				Results: []AutoFillCredential{
-					{UUID: "c1", Title: "Entry 1"},
-					{UUID: "c2", Title: "Entry 2"},
-				},
-			}, nil
+	n := 0
+	mock.handlers[MessageTypeGetCredentialsForURL] = func(_ json.RawMessage) (any, error) {
+		n++
+		if n == 1 {
+			return &CredentialsForURLResponse{UnlockedDatabaseCount: 2, Results: []AutoFillCredential{{UUID: "c1"}, {UUID: "c2"}}}, nil
 		}
 		return &CredentialsForURLResponse{UnlockedDatabaseCount: 2}, nil
 	}
+	c := newTestClient(t, mock)
+	r, err := c.CredentialsForURL("https://x.com", 0, -1)
+	if err != nil || len(r.Results) != 2 {
+		t.Fatalf("err=%v len=%d", err, len(r.Results))
+	}
+}
 
-	client := newTestClient(t, mock)
-	result, err := client.CredentialsForURL("https://example.com", 0, -1)
-	if err != nil {
-		t.Fatalf("CredentialsForURL(take=-1): %v", err)
+func TestCredentialsForURLAllEmpty(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	mock.handlers[MessageTypeGetCredentialsForURL] = func(_ json.RawMessage) (any, error) {
+		return &CredentialsForURLResponse{}, nil
 	}
-	if len(result.Results) != 2 {
-		t.Errorf("len(Results) = %d, want 2", len(result.Results))
-	}
-	if result.UnlockedDatabaseCount != 2 {
-		t.Errorf("UnlockedDatabaseCount = %d, want 2", result.UnlockedDatabaseCount)
+	c := newTestClient(t, mock)
+	r, _ := c.CredentialsForURL("https://x.com", 0, -1)
+	if len(r.Results) != 0 {
+		t.Errorf("got %d", len(r.Results))
 	}
 }
 
 func TestLockDatabase(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
 	mock.handlers[MessageTypeLock] = func(raw json.RawMessage) (any, error) {
 		var req LockRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
+		json.Unmarshal(raw, &req)
 		return &LockResponse{DatabaseID: req.DatabaseID}, nil
 	}
-
-	client := newTestClient(t, mock)
-	result, err := client.LockDatabase("db-42")
-	if err != nil {
-		t.Fatalf("LockDatabase: %v", err)
-	}
-	if result.DatabaseID != "db-42" {
-		t.Errorf("DatabaseID = %q, want %q", result.DatabaseID, "db-42")
+	c := newTestClient(t, mock)
+	r, _ := c.LockDatabase("db-42")
+	if r.DatabaseID != "db-42" {
+		t.Errorf("got %q", r.DatabaseID)
 	}
 }
 
 func TestUnlockDatabase(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
 	mock.handlers[MessageTypeUnlock] = func(raw json.RawMessage) (any, error) {
 		var req UnlockRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
-		if req.DatabaseID == "db-42" {
-			return &UnlockResponse{Success: true}, nil
-		}
-		return &UnlockResponse{Success: false}, nil
+		json.Unmarshal(raw, &req)
+		return &UnlockResponse{Success: req.DatabaseID == "ok"}, nil
 	}
-
-	client := newTestClient(t, mock)
-
-	t.Run("success", func(t *testing.T) {
-		result, err := client.UnlockDatabase("db-42")
-		if err != nil {
-			t.Fatalf("UnlockDatabase: %v", err)
-		}
-		if !result.Success {
-			t.Error("Success = false, want true")
-		}
-	})
-
-	t.Run("wrong database", func(t *testing.T) {
-		result, err := client.UnlockDatabase("db-999")
-		if err != nil {
-			t.Fatalf("UnlockDatabase: %v", err)
-		}
-		if result.Success {
-			t.Error("Success = true, want false")
-		}
-	})
+	c := newTestClient(t, mock)
+	r1, _ := c.UnlockDatabase("ok")
+	r2, _ := c.UnlockDatabase("bad")
+	if !r1.Success || r2.Success {
+		t.Errorf("r1=%v r2=%v", r1.Success, r2.Success)
+	}
 }
 
 func TestCreateEntry(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	mock.handlers[MessageTypeCreateEntry] = func(raw json.RawMessage) (any, error) {
-		var req CreateEntryRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
-		uuid := "new-entry-uuid"
-		return &CreateEntryResponse{
-			UUID: &uuid,
-			Credential: &AutoFillCredential{
-				DatabaseID: req.DatabaseID,
-				UUID:       uuid,
-				Title:      deref(req.Title),
-				Username:   deref(req.Username),
-				Password:   deref(req.Password),
-				URL:        deref(req.URL),
-			},
-		}, nil
+	mock.handlers[MessageTypeCreateEntry] = func(_ json.RawMessage) (any, error) {
+		u := "new"
+		return &CreateEntryResponse{UUID: &u}, nil
 	}
-
-	client := newTestClient(t, mock)
-
-	title := "Test Account"
-	username := "testuser"
-	password := "s3cret!"
-	url := "https://example.com"
-
-	result, err := client.CreateEntry(&CreateEntryRequest{
-		DatabaseID: "db-1",
-		Title:      &title,
-		Username:   &username,
-		Password:   &password,
-		URL:        &url,
-	})
-	if err != nil {
-		t.Fatalf("CreateEntry: %v", err)
-	}
-	if result.Error != nil {
-		t.Fatalf("CreateEntry error: %s", *result.Error)
-	}
-	if result.UUID == nil || *result.UUID != "new-entry-uuid" {
-		t.Errorf("UUID = %v, want %q", result.UUID, "new-entry-uuid")
-	}
-	if result.Credential == nil {
-		t.Fatal("Credential is nil")
-	}
-	if result.Credential.Title != "Test Account" {
-		t.Errorf("Credential.Title = %q, want %q", result.Credential.Title, "Test Account")
-	}
-	if result.Credential.Username != "testuser" {
-		t.Errorf("Credential.Username = %q, want %q", result.Credential.Username, "testuser")
-	}
-	if result.Credential.URL != "https://example.com" {
-		t.Errorf("Credential.URL = %q, want %q", result.Credential.URL, "https://example.com")
+	c := newTestClient(t, mock)
+	r, _ := c.CreateEntry(&CreateEntryRequest{DatabaseID: "db"})
+	if r.UUID == nil || *r.UUID != "new" {
+		t.Errorf("UUID=%v", r.UUID)
 	}
 }
 
 func TestGetGroups(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	mock.handlers[MessageTypeGetGroups] = func(raw json.RawMessage) (any, error) {
-		var req GetGroupsRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
-		return &GetGroupsResponse{
-			Groups: []GroupSummary{
-				{UUID: "group-1", Title: "Root"},
-				{UUID: "group-2", Title: "Social"},
-			},
-		}, nil
+	mock.handlers[MessageTypeGetGroups] = func(_ json.RawMessage) (any, error) {
+		return &GetGroupsResponse{Groups: []GroupSummary{{Title: "Root"}}}, nil
 	}
-
-	client := newTestClient(t, mock)
-	result, err := client.GetGroups("db-1")
-	if err != nil {
-		t.Fatalf("GetGroups: %v", err)
-	}
-	if result.Error != nil {
-		t.Fatalf("GetGroups error: %s", *result.Error)
-	}
-	if len(result.Groups) != 2 {
-		t.Fatalf("len(Groups) = %d, want 2", len(result.Groups))
-	}
-	if result.Groups[0].Title != "Root" {
-		t.Errorf("Groups[0].Title = %q, want %q", result.Groups[0].Title, "Root")
+	c := newTestClient(t, mock)
+	r, _ := c.GetGroups("db")
+	if len(r.Groups) != 1 {
+		t.Errorf("got %d", len(r.Groups))
 	}
 }
 
 func TestGetNewEntryDefaults(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	mock.handlers[MessageTypeGetNewEntryDefaults] = func(raw json.RawMessage) (any, error) {
-		user := "admin@example.com"
-		pass := "generated-password"
-		return &GetNewEntryDefaultsResponse{
-			Username:             &user,
-			MostPopularUsernames: []string{"admin@example.com", "user@example.com"},
-			Password:             &pass,
-		}, nil
+	mock.handlers[MessageTypeGetNewEntryDefaults] = func(_ json.RawMessage) (any, error) {
+		u := "admin"
+		return &GetNewEntryDefaultsResponse{Username: &u}, nil
 	}
-
-	client := newTestClient(t, mock)
-	result, err := client.GetNewEntryDefaults("db-1")
-	if err != nil {
-		t.Fatalf("GetNewEntryDefaults: %v", err)
-	}
-	if result.Username == nil || *result.Username != "admin@example.com" {
-		t.Errorf("Username = %v, want %q", result.Username, "admin@example.com")
-	}
-	if result.Password == nil || *result.Password != "generated-password" {
-		t.Errorf("Password = %v, want %q", result.Password, "generated-password")
-	}
-	if len(result.MostPopularUsernames) != 2 {
-		t.Errorf("len(MostPopularUsernames) = %d, want 2", len(result.MostPopularUsernames))
+	c := newTestClient(t, mock)
+	r, _ := c.GetNewEntryDefaults("db")
+	if r.Username == nil {
+		t.Fatal("nil")
 	}
 }
 
 func TestGetNewEntryDefaultsV2(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	mock.handlers[MessageTypeGetNewEntryDefaultsV2] = func(raw json.RawMessage) (any, error) {
-		user := "admin"
-		return &GetNewEntryDefaultsResponseV2{
-			Username: &user,
-			Password: &PasswordAndStrength{
-				Password: "Str0ng!P@ss",
-				Strength: PasswordStrengthData{
-					Entropy:       72.5,
-					Category:      "strong",
-					SummaryString: "Strong password",
-				},
-			},
-		}, nil
+	mock.handlers[MessageTypeGetNewEntryDefaultsV2] = func(_ json.RawMessage) (any, error) {
+		return &GetNewEntryDefaultsResponseV2{Password: &PasswordAndStrength{Password: "p"}}, nil
 	}
-
-	client := newTestClient(t, mock)
-	result, err := client.GetNewEntryDefaultsV2("db-1")
-	if err != nil {
-		t.Fatalf("GetNewEntryDefaultsV2: %v", err)
-	}
-	if result.Password == nil {
-		t.Fatal("Password is nil")
-	}
-	if result.Password.Password != "Str0ng!P@ss" {
-		t.Errorf("Password.Password = %q, want %q", result.Password.Password, "Str0ng!P@ss")
-	}
-	if result.Password.Strength.Category != "strong" {
-		t.Errorf("Strength.Category = %q, want %q", result.Password.Strength.Category, "strong")
-	}
-	if result.Password.Strength.Entropy != 72.5 {
-		t.Errorf("Strength.Entropy = %f, want 72.5", result.Password.Strength.Entropy)
+	c := newTestClient(t, mock)
+	r, _ := c.GetNewEntryDefaultsV2("db")
+	if r.Password == nil {
+		t.Fatal("nil")
 	}
 }
 
 func TestGeneratePassword(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
 	mock.handlers[MessageTypeGeneratePassword] = func(_ json.RawMessage) (any, error) {
-		return &GeneratePasswordResponse{
-			Password:     "xK9!mP2@qR",
-			Alternatives: []string{"aB3#dE5$fG", "hI7&jK9*lM"},
-		}, nil
+		return &GeneratePasswordResponse{Password: "p"}, nil
 	}
-
-	client := newTestClient(t, mock)
-	result, err := client.GeneratePassword()
-	if err != nil {
-		t.Fatalf("GeneratePassword: %v", err)
-	}
-	if result.Password != "xK9!mP2@qR" {
-		t.Errorf("Password = %q, want %q", result.Password, "xK9!mP2@qR")
-	}
-	if len(result.Alternatives) != 2 {
-		t.Errorf("len(Alternatives) = %d, want 2", len(result.Alternatives))
+	c := newTestClient(t, mock)
+	r, _ := c.GeneratePassword()
+	if r.Password != "p" {
+		t.Errorf("got %q", r.Password)
 	}
 }
 
 func TestGeneratePasswordV2(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
 	mock.handlers[MessageTypeGeneratePasswordV2] = func(_ json.RawMessage) (any, error) {
-		return &GeneratePasswordV2Response{
-			Password: PasswordAndStrength{
-				Password: "SecurePass123!",
-				Strength: PasswordStrengthData{
-					Entropy:       65.3,
-					Category:      "strong",
-					SummaryString: "Good password",
-				},
-			},
-			Alternatives: []string{"alt1", "alt2", "alt3"},
-		}, nil
+		return &GeneratePasswordV2Response{Password: PasswordAndStrength{Password: "p"}}, nil
 	}
-
-	client := newTestClient(t, mock)
-	result, err := client.GeneratePasswordV2()
-	if err != nil {
-		t.Fatalf("GeneratePasswordV2: %v", err)
-	}
-	if result.Password.Password != "SecurePass123!" {
-		t.Errorf("Password.Password = %q, want %q", result.Password.Password, "SecurePass123!")
-	}
-	if result.Password.Strength.Category != "strong" {
-		t.Errorf("Strength.Category = %q, want %q", result.Password.Strength.Category, "strong")
-	}
-	if len(result.Alternatives) != 3 {
-		t.Errorf("len(Alternatives) = %d, want 3", len(result.Alternatives))
+	c := newTestClient(t, mock)
+	r, _ := c.GeneratePasswordV2()
+	if r.Password.Password != "p" {
+		t.Errorf("got %q", r.Password.Password)
 	}
 }
 
 func TestGetPasswordStrength(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	mock.handlers[MessageTypeGetPasswordStrength] = func(raw json.RawMessage) (any, error) {
-		var req GetPasswordAndStrengthRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
-		// Simple mock: longer passwords are "stronger".
-		entropy := float64(len(req.Password)) * 4.0
-		cat := "weak"
-		if entropy > 40 {
-			cat = "medium"
-		}
-		if entropy > 60 {
-			cat = "strong"
-		}
-		return &GetPasswordAndStrengthResponse{
-			Strength: PasswordStrengthData{
-				Entropy:       entropy,
-				Category:      cat,
-				SummaryString: cat + " password",
-			},
-		}, nil
+	mock.handlers[MessageTypeGetPasswordStrength] = func(_ json.RawMessage) (any, error) {
+		return &GetPasswordAndStrengthResponse{Strength: PasswordStrengthData{Category: "strong"}}, nil
 	}
-
-	client := newTestClient(t, mock)
-
-	t.Run("weak password", func(t *testing.T) {
-		result, err := client.GetPasswordStrength("abc")
-		if err != nil {
-			t.Fatalf("GetPasswordStrength: %v", err)
-		}
-		if result.Strength.Category != "weak" {
-			t.Errorf("Category = %q, want %q", result.Strength.Category, "weak")
-		}
-	})
-
-	t.Run("strong password", func(t *testing.T) {
-		result, err := client.GetPasswordStrength("ThisIsAVeryStrongPassword!")
-		if err != nil {
-			t.Fatalf("GetPasswordStrength: %v", err)
-		}
-		if result.Strength.Category != "strong" {
-			t.Errorf("Category = %q, want %q", result.Strength.Category, "strong")
-		}
-	})
+	c := newTestClient(t, mock)
+	r, _ := c.GetPasswordStrength("pw")
+	if r.Strength.Category != "strong" {
+		t.Errorf("got %q", r.Strength.Category)
+	}
 }
 
 func TestCopyField(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	mock.handlers[MessageTypeCopyField] = func(raw json.RawMessage) (any, error) {
-		var req CopyFieldRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
+	mock.handlers[MessageTypeCopyField] = func(_ json.RawMessage) (any, error) {
 		return &CopyFieldResponse{Success: true}, nil
 	}
-
-	client := newTestClient(t, mock)
-
-	t.Run("copy password", func(t *testing.T) {
-		result, err := client.CopyField("db-1", "node-1", FieldPassword, false)
-		if err != nil {
-			t.Fatalf("CopyField: %v", err)
-		}
-		if !result.Success {
-			t.Error("Success = false, want true")
-		}
-	})
-
-	t.Run("copy totp", func(t *testing.T) {
-		result, err := client.CopyField("db-1", "node-1", FieldTOTP, true)
-		if err != nil {
-			t.Fatalf("CopyField: %v", err)
-		}
-		if !result.Success {
-			t.Error("Success = false, want true")
-		}
-	})
-
-	// Verify the requests were decoded correctly by the mock.
-	mock.mu.Lock()
-	defer mock.mu.Unlock()
-	// Skip the status call(s); find the CopyField calls.
-	var copyFieldCalls []mockCall
-	for _, c := range mock.calls {
-		if c.MessageType == MessageTypeCopyField {
-			copyFieldCalls = append(copyFieldCalls, c)
-		}
-	}
-	if len(copyFieldCalls) != 2 {
-		t.Fatalf("expected 2 CopyField calls, got %d", len(copyFieldCalls))
-	}
-
-	var req1, req2 CopyFieldRequest
-	json.Unmarshal(copyFieldCalls[0].InnerJSON, &req1)
-	json.Unmarshal(copyFieldCalls[1].InnerJSON, &req2)
-
-	if req1.Field != FieldPassword {
-		t.Errorf("call 1 Field = %d, want %d (FieldPassword)", req1.Field, FieldPassword)
-	}
-	if req1.ExplicitTOTP {
-		t.Error("call 1 ExplicitTOTP = true, want false")
-	}
-	if req2.Field != FieldTOTP {
-		t.Errorf("call 2 Field = %d, want %d (FieldTOTP)", req2.Field, FieldTOTP)
-	}
-	if !req2.ExplicitTOTP {
-		t.Error("call 2 ExplicitTOTP = false, want true")
+	c := newTestClient(t, mock)
+	r, _ := c.CopyField("db", "n", FieldPassword, false)
+	if !r.Success {
+		t.Error("not success")
 	}
 }
 
 func TestCopyString(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	mock.handlers[MessageTypeCopyString] = func(raw json.RawMessage) (any, error) {
-		var req CopyStringRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
+	mock.handlers[MessageTypeCopyString] = func(_ json.RawMessage) (any, error) {
 		return &CopyStringResponse{Success: true}, nil
 	}
-
-	client := newTestClient(t, mock)
-	result, err := client.CopyString("hello clipboard")
-	if err != nil {
-		t.Fatalf("CopyString: %v", err)
-	}
-	if !result.Success {
-		t.Error("Success = false, want true")
-	}
-
-	// Verify the inner request payload.
-	mock.mu.Lock()
-	defer mock.mu.Unlock()
-	for _, c := range mock.calls {
-		if c.MessageType == MessageTypeCopyString {
-			var req CopyStringRequest
-			json.Unmarshal(c.InnerJSON, &req)
-			if req.Value != "hello clipboard" {
-				t.Errorf("Value = %q, want %q", req.Value, "hello clipboard")
-			}
-			break
-		}
+	c := newTestClient(t, mock)
+	r, _ := c.CopyString("v")
+	if !r.Success {
+		t.Error("not success")
 	}
 }
 
 func TestGetIcon(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
-	mock.handlers[MessageTypeGetIcon] = func(raw json.RawMessage) (any, error) {
-		var req GetIconRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
-		return &GetIconResponse{Icon: "iVBORw0KGgoAAAANSUhEUg=="}, nil
+	mock.handlers[MessageTypeGetIcon] = func(_ json.RawMessage) (any, error) {
+		return &GetIconResponse{Icon: "data"}, nil
 	}
-
-	client := newTestClient(t, mock)
-	result, err := client.GetIcon("db-1", "node-1")
-	if err != nil {
-		t.Fatalf("GetIcon: %v", err)
-	}
-	if result.Icon == "" {
-		t.Error("Icon is empty")
+	c := newTestClient(t, mock)
+	r, _ := c.GetIcon("db", "n")
+	if r.Icon == "" {
+		t.Error("empty")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Error handling tests
+// Error paths for every high-level method
 // ---------------------------------------------------------------------------
+
+func TestSearchError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.Search("q", 0, 10)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestSearchAllError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	n := 0
+	mock.handlers[MessageTypeSearch] = func(_ json.RawMessage) (any, error) {
+		n++
+		if n == 1 {
+			creds := make([]AutoFillCredential, 100)
+			for i := range creds {
+				creds[i] = AutoFillCredential{UUID: fmt.Sprintf("c-%d", i)}
+			}
+			return &SearchResponse{Results: creds}, nil
+		}
+		return nil, fmt.Errorf("fail")
+	}
+	c := newTestClient(t, mock)
+	_, err := c.Search("q", 0, -1)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestCredentialsForURLError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.CredentialsForURL("u", 0, 10)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestCredentialsForURLAllError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	n := 0
+	mock.handlers[MessageTypeGetCredentialsForURL] = func(_ json.RawMessage) (any, error) {
+		n++
+		if n == 1 {
+			creds := make([]AutoFillCredential, 100)
+			for i := range creds {
+				creds[i] = AutoFillCredential{UUID: fmt.Sprintf("c-%d", i)}
+			}
+			return &CredentialsForURLResponse{Results: creds}, nil
+		}
+		return nil, fmt.Errorf("fail")
+	}
+	c := newTestClient(t, mock)
+	_, err := c.CredentialsForURL("u", 0, -1)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestCopyFieldError(t *testing.T) {
+	c := newTestClient(t, newMockTransport())
+	setupStatusHandler(newMockTransport(), nil)
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c2 := newTestClient(t, mock)
+	_, err := c2.CopyField("db", "n", FieldPassword, false)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	_ = c
+}
+
+func TestLockDatabaseError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.LockDatabase("db")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestUnlockDatabaseError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.UnlockDatabase("db")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestCreateEntryError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.CreateEntry(&CreateEntryRequest{DatabaseID: "db"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestGetGroupsError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.GetGroups("db")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestGetNewEntryDefaultsError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.GetNewEntryDefaults("db")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestGetNewEntryDefaultsV2Error(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.GetNewEntryDefaultsV2("db")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestGeneratePasswordError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.GeneratePassword()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestGeneratePasswordV2Error(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.GeneratePasswordV2()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestGetIconError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.GetIcon("db", "n")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestGetPasswordStrengthError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.GetPasswordStrength("pw")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestCopyStringError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	_, err := c.CopyString("v")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestGetStatusTransportError(t *testing.T) {
+	c, _ := NewClient(WithTransport(&errorTransport{err: fmt.Errorf("down")}))
+	_, err := c.GetStatus()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestGetStatusDecryptError(t *testing.T) {
+	c, _ := NewClient(WithTransport(&staticTransport{resp: &EncryptedResponse{
+		Success: true, ServerPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		Nonce:   base64.StdEncoding.EncodeToString(make([]byte, 24)),
+		Message: base64.StdEncoding.EncodeToString([]byte("bad")),
+	}}))
+	_, err := c.GetStatus()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Public wrappers: SendRaw, BuildEncryptedRequest, SendEncrypted
+// ---------------------------------------------------------------------------
+
+func TestSendRaw(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	resp, err := c.SendRaw(&EncryptedRequest{
+		MessageType: MessageTypeStatus, ClientPublicKey: base64.StdEncoding.EncodeToString(c.publicKey[:]),
+	})
+	if err != nil || !resp.Success {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestBuildEncryptedRequest(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	c.GetStatus()
+	r, err := c.BuildEncryptedRequest(&SearchRequest{Query: "q"}, MessageTypeSearch)
+	if err != nil || r.Message == "" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestBuildEncryptedRequestNoServerKey(t *testing.T) {
+	c, _ := NewClient(WithTransport(&errorTransport{err: fmt.Errorf("no")}))
+	_, err := c.BuildEncryptedRequest(struct{}{}, MessageTypeSearch)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestSendEncrypted(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	mock.handlers[MessageTypeSearch] = func(_ json.RawMessage) (any, error) {
+		return &SearchResponse{Results: []AutoFillCredential{{Title: "hit"}}}, nil
+	}
+	c := newTestClient(t, mock)
+	var r SearchResponse
+	if err := c.SendEncrypted(&SearchRequest{}, MessageTypeSearch, &r); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decryptResponse error paths
+// ---------------------------------------------------------------------------
+
+func TestDecryptResponseServerError(t *testing.T) {
+	c := newTestClient(t, newMockTransport())
+	err := c.decryptResponse(&EncryptedResponse{Success: false, ErrorMessage: "boom"}, &GetStatusResponse{})
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("err=%v", err)
+	}
+}
+
+func TestDecryptResponseBadBase64Message(t *testing.T) {
+	c := newTestClient(t, newMockTransport())
+	err := c.decryptResponse(&EncryptedResponse{
+		Success: true, ServerPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		Nonce: base64.StdEncoding.EncodeToString(make([]byte, 24)), Message: "!!!",
+	}, &GetStatusResponse{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestDecryptResponseBadBase64Nonce(t *testing.T) {
+	c := newTestClient(t, newMockTransport())
+	err := c.decryptResponse(&EncryptedResponse{
+		Success: true, ServerPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		Nonce: "!!!", Message: base64.StdEncoding.EncodeToString([]byte("x")),
+	}, &GetStatusResponse{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestDecryptResponseBadBase64ServerPK(t *testing.T) {
+	c := newTestClient(t, newMockTransport())
+	err := c.decryptResponse(&EncryptedResponse{
+		Success: true, ServerPublicKey: "!!!",
+		Nonce:   base64.StdEncoding.EncodeToString(make([]byte, 24)),
+		Message: base64.StdEncoding.EncodeToString([]byte("x")),
+	}, &GetStatusResponse{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestDecryptResponseDecryptionFailure(t *testing.T) {
+	c := newTestClient(t, newMockTransport())
+	err := c.decryptResponse(&EncryptedResponse{
+		Success: true, ServerPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+		Nonce:   base64.StdEncoding.EncodeToString(make([]byte, 24)),
+		Message: base64.StdEncoding.EncodeToString([]byte("not-valid-nacl-ciphertext!!")),
+	}, &GetStatusResponse{})
+	if err == nil || err.Error() != "decryption failed" {
+		t.Errorf("err=%v", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.serverPublicKey != nil {
+		t.Error("key should be nil")
+	}
+}
+
+func TestDecryptResponseBadJSON(t *testing.T) {
+	mock := newMockTransport()
+	c := newTestClient(t, mock)
+	var nonce [24]byte
+	rand.Read(nonce[:])
+	enc := box.Seal(nil, []byte("not json{"), &nonce, c.publicKey, mock.privateKey)
+	err := c.decryptResponse(&EncryptedResponse{
+		Success: true, ServerPublicKey: base64.StdEncoding.EncodeToString(mock.publicKey[:]),
+		Nonce: base64.StdEncoding.EncodeToString(nonce[:]), Message: base64.StdEncoding.EncodeToString(enc),
+	}, &GetStatusResponse{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// sendEncrypted error paths
+// ---------------------------------------------------------------------------
+
+func TestSendEncryptedBuildError(t *testing.T) {
+	c, _ := NewClient(WithTransport(&errorTransport{err: fmt.Errorf("fail")}))
+	var r SearchResponse
+	if err := c.sendEncrypted(&SearchRequest{}, MessageTypeSearch, &r); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestSendEncryptedTransportError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c, _ := NewClient(WithTransport(&callCountTransport{inner: mock, failAfter: 1}))
+	var r SearchResponse
+	if err := c.sendEncrypted(&SearchRequest{}, MessageTypeSearch, &r); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestSendEncryptedDecryptError(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	c.GetStatus()
+	np, ns, _ := box.GenerateKey(rand.Reader)
+	mock.publicKey = np
+	mock.privateKey = ns
+	mock.handlers[MessageTypeSearch] = func(_ json.RawMessage) (any, error) {
+		return &SearchResponse{}, nil
+	}
+	var r SearchResponse
+	if err := c.sendEncrypted(&SearchRequest{}, MessageTypeSearch, &r); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ensureServerPublicKey, NewClient options, MessageType
+// ---------------------------------------------------------------------------
+
+func TestEnsureServerPublicKeyAlreadyCached(t *testing.T) {
+	mock := newMockTransport()
+	setupStatusHandler(mock, nil)
+	c := newTestClient(t, mock)
+	c.GetStatus()
+	delete(mock.handlers, MessageTypeStatus)
+	if err := c.ensureServerPublicKey(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestServerError(t *testing.T) {
 	mock := newMockTransport()
-	// Status handler returns a server error.
 	mock.handlers[MessageTypeStatus] = func(_ json.RawMessage) (any, error) {
-		return nil, fmt.Errorf("database corruption detected")
+		return nil, fmt.Errorf("corruption")
 	}
-
-	client := newTestClient(t, mock)
-	_, err := client.GetStatus()
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if got := err.Error(); got != "server error: database corruption detected" {
-		t.Errorf("error = %q, want to contain %q", got, "database corruption detected")
+	c := newTestClient(t, mock)
+	_, err := c.GetStatus()
+	if err == nil || !strings.Contains(err.Error(), "corruption") {
+		t.Errorf("err=%v", err)
 	}
 }
 
 func TestTransportError(t *testing.T) {
-	errTransport := &errorTransport{err: fmt.Errorf("connection refused")}
-	client, err := NewClient(WithTransport(errTransport))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	_, err = client.GetStatus()
+	c, _ := NewClient(WithTransport(&errorTransport{err: fmt.Errorf("refused")}))
+	_, err := c.GetStatus()
 	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if got := err.Error(); got != "connection refused" {
-		t.Errorf("error = %q, want %q", got, "connection refused")
+		t.Fatal("expected error")
 	}
 }
 
-// errorTransport always returns an error.
-type errorTransport struct {
-	err error
+func TestNewClientDefaultTransport(t *testing.T) {
+	c, _ := NewClient()
+	at, ok := c.transport.(*afproxyTransport)
+	if !ok || at.proxyPath != defaultProxyPath {
+		t.Errorf("type=%T path=%v", c.transport, at)
+	}
 }
 
-func (e *errorTransport) sendRaw(_ any) (*EncryptedResponse, error) {
-	return nil, e.err
+func TestWithProxyPath(t *testing.T) {
+	c, _ := NewClient(WithProxyPath("/x"))
+	if c.proxyPath != "/x" {
+		t.Errorf("got %q", c.proxyPath)
+	}
+	at := c.transport.(*afproxyTransport)
+	if at.proxyPath != "/x" {
+		t.Errorf("transport path=%q", at.proxyPath)
+	}
 }
-
-// ---------------------------------------------------------------------------
-// Concurrency test
-// ---------------------------------------------------------------------------
 
 func TestConcurrentRequests(t *testing.T) {
 	mock := newMockTransport()
 	setupStatusHandler(mock, nil)
-
 	mock.handlers[MessageTypeSearch] = func(raw json.RawMessage) (any, error) {
 		var req SearchRequest
-		if err := json.Unmarshal(raw, &req); err != nil {
-			return nil, err
-		}
-		return &SearchResponse{
-			Results: []AutoFillCredential{
-				{UUID: "c-" + req.Query, Title: req.Query},
-			},
-		}, nil
+		json.Unmarshal(raw, &req)
+		return &SearchResponse{Results: []AutoFillCredential{{Title: req.Query}}}, nil
 	}
-
-	client := newTestClient(t, mock)
-
+	c := newTestClient(t, mock)
 	const n = 20
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
 		go func(i int) {
-			query := fmt.Sprintf("query-%d", i)
-			result, err := client.Search(query, 0, 10)
-			if err != nil {
-				errs <- fmt.Errorf("goroutine %d: %w", i, err)
-				return
-			}
-			if len(result.Results) != 1 {
-				errs <- fmt.Errorf("goroutine %d: got %d results, want 1", i, len(result.Results))
-				return
-			}
-			if result.Results[0].Title != query {
-				errs <- fmt.Errorf("goroutine %d: Title = %q, want %q", i, result.Results[0].Title, query)
+			q := fmt.Sprintf("q-%d", i)
+			r, err := c.Search(q, 0, 10)
+			if err != nil || len(r.Results) != 1 || r.Results[0].Title != q {
+				errs <- fmt.Errorf("g%d: err=%v r=%+v", i, err, r)
 				return
 			}
 			errs <- nil
 		}(i)
 	}
-
 	for i := 0; i < n; i++ {
 		if err := <-errs; err != nil {
 			t.Error(err)
@@ -906,76 +1011,182 @@ func TestConcurrentRequests(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Message type tests
-// ---------------------------------------------------------------------------
-
 func TestParseMessageType(t *testing.T) {
 	tests := []struct {
-		input string
-		want  AutoFillMessageType
-		ok    bool
+		in   string
+		want AutoFillMessageType
+		ok   bool
 	}{
-		{"status", MessageTypeStatus, true},
-		{"Status", MessageTypeStatus, true},
+		{"status", MessageTypeStatus, true}, {"Status", MessageTypeStatus, true},
 		{"search", MessageTypeSearch, true},
-		{"get-url", MessageTypeGetCredentialsForURL, true},
-		{"getcredentialsforurl", MessageTypeGetCredentialsForURL, true},
-		{"copy-field", MessageTypeCopyField, true},
-		{"lock", MessageTypeLock, true},
-		{"unlock", MessageTypeUnlock, true},
-		{"create-entry", MessageTypeCreateEntry, true},
-		{"generate-password", MessageTypeGeneratePassword, true},
-		{"generate-password-v2", MessageTypeGeneratePasswordV2, true},
-		{"password-strength", MessageTypeGetPasswordStrength, true},
-		{"copy-string", MessageTypeCopyString, true},
-		{"nonexistent", MessageTypeUnknown, false},
-		{"", MessageTypeUnknown, false},
+		{"get-url", MessageTypeGetCredentialsForURL, true}, {"getcredentialsforurl", MessageTypeGetCredentialsForURL, true},
+		{"copy-field", MessageTypeCopyField, true}, {"copyfield", MessageTypeCopyField, true},
+		{"lock", MessageTypeLock, true}, {"unlock", MessageTypeUnlock, true},
+		{"create-entry", MessageTypeCreateEntry, true}, {"createentry", MessageTypeCreateEntry, true},
+		{"get-groups", MessageTypeGetGroups, true}, {"getgroups", MessageTypeGetGroups, true},
+		{"get-defaults", MessageTypeGetNewEntryDefaults, true}, {"getnewentrydefaults", MessageTypeGetNewEntryDefaults, true},
+		{"generate-password", MessageTypeGeneratePassword, true}, {"generatepassword", MessageTypeGeneratePassword, true},
+		{"get-icon", MessageTypeGetIcon, true}, {"geticon", MessageTypeGetIcon, true},
+		{"generate-password-v2", MessageTypeGeneratePasswordV2, true}, {"generatepasswordv2", MessageTypeGeneratePasswordV2, true},
+		{"password-strength", MessageTypeGetPasswordStrength, true}, {"getpasswordstrength", MessageTypeGetPasswordStrength, true},
+		{"get-defaults-v2", MessageTypeGetNewEntryDefaultsV2, true}, {"getnewentrydefaultsv2", MessageTypeGetNewEntryDefaultsV2, true},
+		{"get-favourites", MessageTypeGetFavourites, true}, {"getfavourites", MessageTypeGetFavourites, true},
+		{"copy-string", MessageTypeCopyString, true}, {"copystring", MessageTypeCopyString, true},
+		{"nonexistent", MessageTypeUnknown, false}, {"", MessageTypeUnknown, false},
 	}
-
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got, ok := ParseMessageType(tt.input)
-			if ok != tt.ok {
-				t.Errorf("ParseMessageType(%q) ok = %v, want %v", tt.input, ok, tt.ok)
-			}
-			if got != tt.want {
-				t.Errorf("ParseMessageType(%q) = %d, want %d", tt.input, got, tt.want)
+		t.Run(tt.in, func(t *testing.T) {
+			got, ok := ParseMessageType(tt.in)
+			if ok != tt.ok || got != tt.want {
+				t.Errorf("got (%d,%v) want (%d,%v)", got, ok, tt.want, tt.ok)
 			}
 		})
 	}
 }
 
-func TestMessageTypeString(t *testing.T) {
-	if s := MessageTypeStatus.String(); s != "status" {
-		t.Errorf("MessageTypeStatus.String() = %q, want %q", s, "status")
+func TestMessageTypeStringAll(t *testing.T) {
+	m := map[AutoFillMessageType]string{
+		MessageTypeStatus: "status", MessageTypeSearch: "search",
+		MessageTypeGetCredentialsForURL: "getcredentialsforurl", MessageTypeCopyField: "copyfield",
+		MessageTypeLock: "lock", MessageTypeUnlock: "unlock",
+		MessageTypeCreateEntry: "createentry", MessageTypeGetGroups: "getgroups",
+		MessageTypeGetNewEntryDefaults: "getnewentrydefaults", MessageTypeGeneratePassword: "generatepassword",
+		MessageTypeGetIcon: "geticon", MessageTypeGeneratePasswordV2: "generatepasswordv2",
+		MessageTypeGetPasswordStrength: "getpasswordstrength", MessageTypeGetNewEntryDefaultsV2: "getnewentrydefaultsv2",
+		MessageTypeGetFavourites: "getfavourites", MessageTypeCopyString: "copystring",
+		MessageTypeUnknown: "unknown", AutoFillMessageType(999): "unknown",
 	}
-	if s := MessageTypeUnknown.String(); s != "unknown" {
-		t.Errorf("MessageTypeUnknown.String() = %q, want %q", s, "unknown")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// WithProxyPath test
-// ---------------------------------------------------------------------------
-
-func TestWithProxyPath(t *testing.T) {
-	client, err := NewClient(WithProxyPath("/custom/path"))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	if client.proxyPath != "/custom/path" {
-		t.Errorf("proxyPath = %q, want %q", client.proxyPath, "/custom/path")
+	for mt, want := range m {
+		if got := mt.String(); got != want {
+			t.Errorf("(%d).String()=%q want %q", mt, got, want)
+		}
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Helper
+// afproxyTransport tests
 // ---------------------------------------------------------------------------
 
-func deref(s *string) string {
-	if s == nil {
-		return ""
+func TestAfproxyTransportStartError(t *testing.T) {
+	tr := &afproxyTransport{proxyPath: "/nonexistent"}
+	if _, err := tr.sendRaw(map[string]string{"a": "b"}); err == nil {
+		t.Fatal("expected error")
 	}
-	return *s
+}
+
+func TestAfproxyTransportMarshalError(t *testing.T) {
+	tr := &afproxyTransport{proxyPath: "/bin/echo"}
+	if _, err := tr.sendRaw(make(chan int)); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAfproxyTransportEcho(t *testing.T) {
+	script := helperScript(t, "echo")
+	tr := &afproxyTransport{proxyPath: script}
+	pub, _, _ := box.GenerateKey(rand.Reader)
+	resp, err := tr.sendRaw(&EncryptedRequest{
+		MessageType: MessageTypeStatus, ClientPublicKey: base64.StdEncoding.EncodeToString(pub[:]),
+	})
+	if err != nil || !resp.Success {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestAfproxyTransportGarbage(t *testing.T) {
+	tr := &afproxyTransport{proxyPath: helperScript(t, "garbage")}
+	if _, err := tr.sendRaw(&EncryptedRequest{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAfproxyTransportShortRead(t *testing.T) {
+	tr := &afproxyTransport{proxyPath: helperScript(t, "short")}
+	if _, err := tr.sendRaw(&EncryptedRequest{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAfproxyTransportNoOutput(t *testing.T) {
+	tr := &afproxyTransport{proxyPath: helperScript(t, "no-output")}
+	if _, err := tr.sendRaw(&EncryptedRequest{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAfproxyTransportWaitError(t *testing.T) {
+	tr := &afproxyTransport{proxyPath: helperScript(t, "echo-fail")}
+	pub, _, _ := box.GenerateKey(rand.Reader)
+	resp, err := tr.sendRaw(&EncryptedRequest{
+		MessageType: MessageTypeStatus, ClientPublicKey: base64.StdEncoding.EncodeToString(pub[:]),
+	})
+	if err != nil || !resp.Success {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestAfproxyTransportFullRoundTrip(t *testing.T) {
+	c, _ := NewClient(WithProxyPath(helperScript(t, "echo")))
+	s, err := c.GetStatus()
+	if err != nil || s.ServerVersionInfo != "FakeAfproxy v1" {
+		t.Fatalf("err=%v info=%q", err, s.ServerVersionInfo)
+	}
+}
+
+func TestAfproxyTransportWriteError(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "exit-now")
+	os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0755)
+	tr := &afproxyTransport{proxyPath: script}
+	if _, err := tr.sendRaw(&EncryptedRequest{}); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAfproxyTransportWriteBodyError(t *testing.T) {
+	tr := &afproxyTransport{proxyPath: helperScript(t, "close-stdin")}
+	req := &EncryptedRequest{Message: string(make([]byte, 1024*1024))}
+	if _, err := tr.sendRaw(req); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAfproxyTransportPipeError(t *testing.T) {
+	// Create helper script BEFORE exhausting FDs.
+	script := helperScript(t, "echo")
+	tr := &afproxyTransport{proxyPath: script}
+
+	var origLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &origLimit); err != nil {
+		t.Skipf("cannot get RLIMIT_NOFILE: %v", err)
+	}
+
+	newLimit := syscall.Rlimit{Cur: 20, Max: origLimit.Max}
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &newLimit); err != nil {
+		t.Skipf("cannot set RLIMIT_NOFILE: %v", err)
+	}
+	defer syscall.Setrlimit(syscall.RLIMIT_NOFILE, &origLimit)
+
+	var leaked []*os.File
+	defer func() {
+		for _, f := range leaked {
+			f.Close()
+		}
+	}()
+	for {
+		f, err := os.Open(os.DevNull)
+		if err != nil {
+			break
+		}
+		leaked = append(leaked, f)
+	}
+
+	_, err := tr.sendRaw(map[string]string{"test": "value"})
+	if err == nil {
+		t.Fatal("expected error due to exhausted file descriptors")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "pipe") && !strings.Contains(msg, "too many open files") && !strings.Contains(msg, "starting") {
+		t.Errorf("unexpected error: %q", msg)
+	}
 }

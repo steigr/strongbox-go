@@ -29,7 +29,6 @@ type transport interface {
 // and manages the lifecycle of afproxy processes.
 //
 // The Client is safe for concurrent use. Each request spawns a new afproxy process,
-// The Client is safe for concurrent use. Each request spawns a new afproxy process,
 // matching the behavior of browser native messaging.
 type Client struct {
 	// proxyPath is the filesystem path to the afproxy binary
@@ -171,6 +170,7 @@ func (t *afproxyTransport) sendRaw(request any) (*EncryptedResponse, error) {
 
 	if err := cmd.Wait(); err != nil {
 		// afproxy may exit non-zero after responding; ignore if we got data
+		_ = err
 	}
 
 	var resp EncryptedResponse
@@ -439,9 +439,6 @@ func (c *Client) credentialsForURLAll(url string, skip int) (*CredentialsForURLR
 		currentSkip += len(result.Results)
 	}
 
-	if lastResponse == nil {
-		return &CredentialsForURLResponse{Results: allResults}, nil
-	}
 	lastResponse.Results = allResults
 	return lastResponse, nil
 }
