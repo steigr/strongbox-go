@@ -27,6 +27,11 @@ go build -o strongbox ./cmd/strongbox
 # Show status and databases
 strongbox status
 
+# afproxy-cli - direct interaction with afproxy
+afproxy-cli --type status
+afproxy-cli --type search --payload '{"query": "github", "skip": 0, "take": 10}'
+```
+
 # Search for credentials
 strongbox search "github"
 
