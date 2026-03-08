@@ -43,8 +43,8 @@ func main() {
 	var matches []strongbox.AutoFillCredential
 	hostWithProtocol := "ssh://" + host
 	for _, cred := range searchResult.Results {
-		// Match user and host (case-insensitive for host)
-		if cred.Username == user && (strings.Contains(strings.ToLower(cred.URL), strings.ToLower(host)) || strings.Contains(strings.ToLower(cred.URL), strings.ToLower(hostWithProtocol)) || strings.Contains(strings.ToLower(cred.Title), strings.ToLower(host))) {
+		// Match user and host (case-insensitive)
+		if strings.EqualFold(cred.Username, user) && (strings.Contains(strings.ToLower(cred.URL), strings.ToLower(host)) || strings.Contains(strings.ToLower(cred.URL), strings.ToLower(hostWithProtocol)) || strings.Contains(strings.ToLower(cred.Title), strings.ToLower(host))) {
 			matches = append(matches, cred)
 		}
 	}

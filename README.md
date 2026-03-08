@@ -31,7 +31,13 @@ strongbox status
 strongbox search "github"
 
 # Get credentials for a URL
-strongbox get "https://github.com"
+strongbox get-url "https://github.com"
+strongbox get-url "https://github.com" -f password
+
+# Get an entry by name
+strongbox get "My Entry"
+strongbox get "My Entry" -f password
+strongbox get ssh passphrase --field=password
 
 # strongsshpass - sshpass-like tool using Strongbox
 go run ./examples/strongsshpass user@host
@@ -68,7 +74,9 @@ strongbox defaults <database-id>
 strongbox icon <database-id> <node-id>
 ```
 
-All commands output JSON to stdout.
+All commands support global flags:
+- `-U, --unlock <true|false|try>`: Control automatic database unlocking (default: try).
+- `-o, --output <pretty|json|yaml|csv|tsv>`: Output format (default: pretty).
 
 ## Library Usage
 
