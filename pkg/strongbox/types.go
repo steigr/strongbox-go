@@ -6,8 +6,6 @@ import "strings"
 type AutoFillMessageType int
 
 const (
-	// MessageTypeUnknown represents an unknown message type.
-	MessageTypeUnknown AutoFillMessageType = -1
 	// MessageTypeStatus is used to get the status of the Strongbox server and the list of available databases.
 	MessageTypeStatus AutoFillMessageType = iota
 	// MessageTypeSearch is used to search for entries across all unlocked databases.
@@ -40,6 +38,8 @@ const (
 	MessageTypeGetFavourites
 	// MessageTypeCopyString is used to copy an arbitrary string to the clipboard via Strongbox.
 	MessageTypeCopyString
+	// MessageTypeUnknown represents an unknown message type.
+	MessageTypeUnknown AutoFillMessageType = -1
 )
 
 var messageTypeNames = map[AutoFillMessageType][]string{
