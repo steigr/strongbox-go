@@ -1151,42 +1151,85 @@ func TestAfproxyTransportWriteBodyError(t *testing.T) {
 	}
 }
 
-func TestAfproxyTransportPipeError(t *testing.T) {
-	// Create helper script BEFORE exhausting FDs.
-	script := helperScript(t, "echo")
-	tr := &afproxyTransport{proxyPath: script}
+// exhaustFDs lowers RLIMIT_NOFILE, then opens files until exactly `remaining`
+// file descriptors are left.  It returns a cleanup function that closes the
+// leaked files and restores the original limit.  The caller MUST defer the
+// cleanup.
+func exhaustFDs(t *testing.T, remaining int) func() {
+	t.Helper()
 
 	var origLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &origLimit); err != nil {
 		t.Skipf("cannot get RLIMIT_NOFILE: %v", err)
 	}
 
-	newLimit := syscall.Rlimit{Cur: 20, Max: origLimit.Max}
+	// Choose a low soft limit that is still large enough for the test
+	// framework itself.  The test infra needs stdin/stdout/stderr (3) plus a
+	// few more for the runtime.  50 is a safe floor.
+	const lowLimit = 50
+	newLimit := syscall.Rlimit{Cur: lowLimit, Max: origLimit.Max}
 	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &newLimit); err != nil {
 		t.Skipf("cannot set RLIMIT_NOFILE: %v", err)
 	}
-	defer syscall.Setrlimit(syscall.RLIMIT_NOFILE, &origLimit)
 
+	// Consume FDs until we can't open any more.
 	var leaked []*os.File
-	defer func() {
-		for _, f := range leaked {
-			f.Close()
-		}
-	}()
 	for {
 		f, err := os.Open(os.DevNull)
 		if err != nil {
-			break
+			break // hit the limit
 		}
 		leaked = append(leaked, f)
 	}
 
+	// Now release exactly `remaining` FDs so that the caller has that many
+	// available.
+	for i := 0; i < remaining && len(leaked) > 0; i++ {
+		last := leaked[len(leaked)-1]
+		last.Close()
+		leaked = leaked[:len(leaked)-1]
+	}
+
+	return func() {
+		for _, f := range leaked {
+			f.Close()
+		}
+		syscall.Setrlimit(syscall.RLIMIT_NOFILE, &origLimit)
+	}
+}
+
+func TestAfproxyTransportStdinPipeError(t *testing.T) {
+	// StdinPipe() calls os.Pipe() which needs 2 FDs.
+	// Leave 0 FDs available → StdinPipe fails with EMFILE.
+	script := helperScript(t, "echo")
+	tr := &afproxyTransport{proxyPath: script}
+
+	cleanup := exhaustFDs(t, 0)
+	defer cleanup()
+
 	_, err := tr.sendRaw(map[string]string{"test": "value"})
 	if err == nil {
-		t.Fatal("expected error due to exhausted file descriptors")
+		t.Fatal("expected error due to exhausted FDs")
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "pipe") && !strings.Contains(msg, "too many open files") && !strings.Contains(msg, "starting") {
-		t.Errorf("unexpected error: %q", msg)
+	if !strings.Contains(err.Error(), "stdin pipe") {
+		t.Errorf("expected stdin pipe error, got: %q", err.Error())
+	}
+}
+
+func TestAfproxyTransportStdoutPipeError(t *testing.T) {
+	// StdinPipe() needs 2 FDs, StdoutPipe() needs 2 more.
+	// Leave exactly 2 FDs → StdinPipe succeeds, StdoutPipe fails.
+	script := helperScript(t, "echo")
+	tr := &afproxyTransport{proxyPath: script}
+
+	cleanup := exhaustFDs(t, 2)
+	defer cleanup()
+
+	_, err := tr.sendRaw(map[string]string{"test": "value"})
+	if err == nil {
+		t.Fatal("expected error due to exhausted FDs")
+	}
+	if !strings.Contains(err.Error(), "stdout pipe") {
+		t.Errorf("expected stdout pipe error, got: %q", err.Error())
 	}
 }
