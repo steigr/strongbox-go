@@ -1,6 +1,11 @@
 package main
 
-import "github.com/spf13/cobra"
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+)
 
 var searchCmd = &cobra.Command{
 	Use:   "search <query>",
@@ -14,12 +19,17 @@ Use --skip and --take for pagination.`,
   strongbox search mypassword --output json`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
- 		ensureAutoFillDatabase(client, unlockBehavior)
+		status := ensureAutoFillDatabase(client, unlockBehavior)
 		probeTerminal()
 		query := args[0]
 		result, err := client.Search(query, skip, take)
 		if err != nil {
 			fatal("searching: %v", err)
+		}
+		if len(result.Results) == 0 {
+			if hint := unlockedNonAutoFillHint(status); hint != "" {
+				fmt.Fprintln(os.Stderr, hint)
+			}
 		}
 		printResult(result, true)
 	},

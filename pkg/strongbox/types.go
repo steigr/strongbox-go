@@ -246,6 +246,10 @@ type AutoFillCredential struct {
 	Notes string `json:"notes"`
 	// Modified is the timestamp of the last modification.
 	Modified string `json:"modified"`
+	// BreadcrumbTitle is the full group path to this entry within its database,
+	// e.g. "foo > bar" or "foo/bar". Populated when Strongbox includes path
+	// information in AutoFill search results; empty otherwise.
+	BreadcrumbTitle string `json:"breadcrumb,omitempty"`
 }
 
 // CredentialsForURLRequest is the request payload for retrieving credentials that match a specific URL.

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
-
 	"github.com/spf13/cobra"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -47,7 +45,7 @@ For passphrase-protected keys the passphrase is resolved in priority order:
 
 		ensureAutoFillDatabase(client, unlockBehavior)
 
-		result, err := client.Search(name, 0, -1)
+		result, err := client.Search(searchTerm(name), 0, -1)
 		if err != nil {
 			fatal("searching: %v", err)
 		}
@@ -55,13 +53,7 @@ For passphrase-protected keys the passphrase is resolved in priority order:
 			fatal("no entry found matching '%s'", name)
 		}
 
-		entry := result.Results[0]
-		for _, r := range result.Results {
-			if strings.EqualFold(r.Title, name) {
-				entry = r
-				break
-			}
-		}
+		entry := *resolveEntry(result.Results, name)
 
 		var keyPEM string
 		var keyField string

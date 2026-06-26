@@ -833,6 +833,35 @@ func ensureAutoFillDatabase(client *strongbox.Client, unlockBehavior string) *st
 	return nil
 }
 
+// unlockedNonAutoFillHint returns a non-empty warning string when status
+// contains databases that are unlocked but have AutoFill disabled. The
+// Strongbox AutoFill protocol only searches AutoFill-enabled databases, so
+// entries in those databases are invisible to Search regardless of lock state.
+func unlockedNonAutoFillHint(status *strongbox.GetStatusResponse) string {
+	var names []string
+	for _, db := range status.Databases {
+		if !db.Locked && !db.AutoFillEnabled {
+			names = append(names, db.NickName)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	noun := "database"
+	if len(names) > 1 {
+		noun = "databases"
+	}
+	return fmt.Sprintf(
+		"note: %s (%s) %s unlocked but has AutoFill disabled — "+
+			"entries in %s are not searchable via the AutoFill protocol; "+
+			"enable AutoFill in Strongbox settings to include %s in searches",
+		strings.Join(names, ", "), noun,
+		map[bool]string{true: "are", false: "is"}[len(names) > 1],
+		map[bool]string{true: "them", false: "it"}[len(names) > 1],
+		map[bool]string{true: "them", false: "it"}[len(names) > 1],
+	)
+}
+
 func findDatabase(status *strongbox.GetStatusResponse, idOrNickname string) string {
 	for _, db := range status.Databases {
 		if strings.EqualFold(db.UUID, idOrNickname) {

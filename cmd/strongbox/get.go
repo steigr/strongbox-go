@@ -21,26 +21,20 @@ If a field is specified with --field, only that field value is printed.`,
 		fieldName, _ := cmd.Flags().GetString("field")
 		name := strings.Join(args, " ")
 
-		ensureAutoFillDatabase(client, unlockBehavior)
-		result, err := client.Search(name, 0, -1)
+		status := ensureAutoFillDatabase(client, unlockBehavior)
+		result, err := client.Search(searchTerm(name), 0, -1)
 		if err != nil {
 			fatal("searching: %v", err)
 		}
 
 		if len(result.Results) == 0 {
+			if hint := unlockedNonAutoFillHint(status); hint != "" {
+				fatal("no entry found matching '%s'\n%s", name, hint)
+			}
 			fatal("no entry found matching '%s'", name)
 		}
 
-		var entry *strongbox.AutoFillCredential
-		for i := range result.Results {
-			if strings.EqualFold(result.Results[i].Title, name) {
-				entry = &result.Results[i]
-				break
-			}
-		}
-		if entry == nil {
-			entry = &result.Results[0]
-		}
+		entry := resolveEntry(result.Results, name)
 
 		if fieldName != "" {
 			printField(*entry, fieldName)
