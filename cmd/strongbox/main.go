@@ -99,6 +99,7 @@ func init() {
 	rootCmd.AddCommand(createEntryCmd)
 	rootCmd.AddCommand(defaultsCmd)
 	rootCmd.AddCommand(iconCmd)
+	rootCmd.AddCommand(sshCmd)
 }
 
 func main() {

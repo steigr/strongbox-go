@@ -746,6 +746,93 @@ func ensureUnlockedDatabase(client *strongbox.Client, unlockBehavior string) *st
 	return nil
 }
 
+// ensureAutoFillDatabase is like ensureUnlockedDatabase but for commands that
+// use the Search API, which only queries AutoFill-enabled databases. It
+// preferentially unlocks an AutoFill database and falls back to any unlocked
+// database so that callers can still proceed when no AutoFill DB is available.
+func ensureAutoFillDatabase(client *strongbox.Client, unlockBehavior string) *strongbox.GetStatusResponse {
+	status, err := client.GetStatus()
+	if err != nil {
+		errStart := exec.Command("open", "-a", "Strongbox").Run()
+		if errStart != nil {
+			fatal("getting status: %v (failed to start Strongbox: %v)", err, errStart)
+		}
+
+		retries := 10
+		for i := 0; i < retries; i++ {
+			time.Sleep(500 * time.Millisecond)
+			status, err = client.GetStatus()
+			if err == nil {
+				break
+			}
+		}
+
+		if err != nil {
+			fatal("getting status: %v (Strongbox did not respond after starting)", err)
+		}
+	}
+
+	if len(status.Databases) == 0 {
+		fatal("no databases found in Strongbox")
+	}
+
+	checkAutoFillUnlocked := func(databases []strongbox.DatabaseSummary) bool {
+		for _, db := range databases {
+			if db.AutoFillEnabled && !db.Locked {
+				return true
+			}
+		}
+		return false
+	}
+
+	checkUnlocked := func(databases []strongbox.DatabaseSummary) bool {
+		for _, db := range databases {
+			if !db.Locked {
+				return true
+			}
+		}
+		return false
+	}
+
+	if checkAutoFillUnlocked(status.Databases) {
+		return status
+	}
+
+	if unlockBehavior != "false" {
+		var autoFillDBs []string
+		for _, db := range status.Databases {
+			if db.AutoFillEnabled {
+				autoFillDBs = append(autoFillDBs, db.UUID)
+			}
+		}
+
+		if len(autoFillDBs) == 1 {
+			_, err := client.UnlockDatabase(autoFillDBs[0])
+			if err != nil && unlockBehavior == "true" {
+				fatal("auto-unlock failed: %v", err)
+			}
+
+			status, err = client.GetStatus()
+			if err != nil {
+				fatal("getting status after auto-unlock: %v", err)
+			}
+
+			if checkAutoFillUnlocked(status.Databases) {
+				return status
+			}
+		}
+	}
+
+	// Fall back to any unlocked database.
+	if checkUnlocked(status.Databases) {
+		return status
+	}
+
+	fmt.Fprintf(os.Stderr, "error: all databases are locked. Please unlock at least one database in Strongbox.\n")
+	os.Exit(1)
+	return nil
+}
+
 func findDatabase(status *strongbox.GetStatusResponse, idOrNickname string) string {
 	for _, db := range status.Databases {
 		if strings.EqualFold(db.UUID, idOrNickname) {
