@@ -13,14 +13,8 @@ import (
 	"github.com/steigr/strongbox-go/pkg/strongbox"
 )
 
-var sshCmd = &cobra.Command{
-	Use:   "ssh",
-	Short: "SSH-related commands",
-	Long:  `Commands for SSH key management and agent interaction.`,
-}
-
 var sshAgentCmd = &cobra.Command{
-	Use:   "agent",
+	Use:   "ssh-agent",
 	Short: "Interact with the running SSH agent",
 }
 
@@ -36,8 +30,8 @@ For passphrase-protected keys the passphrase is resolved in priority order:
   1. SSH_KEY_PASSPHRASE environment variable
   2. The entry's password field (when --field is not "password")
   3. Interactive prompt (when stdin is a terminal)`,
-	Example: `  strongbox ssh agent load-key "My SSH Key"
-  strongbox ssh agent load-key "My SSH Key" --field id_ed25519`,
+	Example: `  strongbox ssh-agent load-key "My SSH Key"
+  strongbox ssh-agent load-key "My SSH Key" --field id_ed25519`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		fieldName, _ := cmd.Flags().GetString("field")
@@ -84,7 +78,6 @@ For passphrase-protected keys the passphrase is resolved in priority order:
 func init() {
 	sshAgentLoadKeyCmd.Flags().StringP("field", "f", "", "Field containing the SSH private key")
 	sshAgentCmd.AddCommand(sshAgentLoadKeyCmd)
-	sshCmd.AddCommand(sshAgentCmd)
 }
 
 // entryField returns the value of the named field from an entry,

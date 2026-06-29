@@ -100,9 +100,16 @@ func init() {
 	rootCmd.AddCommand(defaultsCmd)
 	rootCmd.AddCommand(iconCmd)
 	rootCmd.AddCommand(sshCmd)
+	rootCmd.AddCommand(sshAgentCmd)
 }
 
 func main() {
+	// When invoked as an SSH_ASKPASS helper by "ssh run", print the stored
+	// password and exit before Cobra initialises anything.
+	if handleAskpassMode(os.Stdout) {
+		return
+	}
+
 	// Pre-process args to handle --help with a value parameter.
 	// Cobra treats --help as a boolean flag, so we intercept "short" / "all"
 	// before Cobra ever sees them.
