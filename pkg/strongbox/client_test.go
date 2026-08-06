@@ -966,7 +966,7 @@ func TestTransportError(t *testing.T) {
 func TestNewClientDefaultTransport(t *testing.T) {
 	c, _ := NewClient()
 	at, ok := c.transport.(*afproxyTransport)
-	if !ok || at.proxyPath != defaultProxyPath {
+	if !ok || at.proxyPath != detectDefaultProxyPath() {
 		t.Errorf("type=%T path=%v", c.transport, at)
 	}
 }

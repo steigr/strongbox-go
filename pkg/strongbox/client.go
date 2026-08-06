@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 
@@ -14,8 +15,29 @@ import (
 )
 
 // defaultProxyPath is the standard installation path for the Strongbox native messaging host (afproxy)
-// on macOS. This binary is used to communicate with the Strongbox Password Manager application.
+// on macOS, as installed by the subscription (Mac App Store / licensed) variant of Strongbox.
 const defaultProxyPath = "/Applications/Strongbox.app/Contents/MacOS/afproxy"
+
+// defaultProxyPathV2 is the installation path for afproxy as installed by the perpetual-license
+// variant of Strongbox, which installs itself as "Strongbox 2.app" alongside (or instead of)
+// the subscription variant.
+const defaultProxyPathV2 = "/Applications/Strongbox 2.app/Contents/MacOS/afproxy"
+
+// defaultProxyPaths lists the known afproxy installation paths, in the order they are probed by
+// detectDefaultProxyPath.
+var defaultProxyPaths = []string{defaultProxyPath, defaultProxyPathV2}
+
+// detectDefaultProxyPath returns the first afproxy installation path that exists on disk,
+// checking each entry in defaultProxyPaths in order. If none exist (e.g. Strongbox isn't
+// installed, or this isn't macOS), it falls back to defaultProxyPath.
+func detectDefaultProxyPath() string {
+	for _, p := range defaultProxyPaths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return defaultProxyPath
+}
 
 // transport is the internal interface for sending a raw native-messaging request.
 // The default implementation spawns an afproxy process. Tests can substitute a mock
@@ -69,7 +91,9 @@ func WithTransport(t transport) Option {
 // NewClient creates a new Strongbox client with the specified options.
 // It generates an ephemeral Curve25519 keypair for encrypting communication with the server.
 //
-// By default, it uses the standard afproxy path at /Applications/Strongbox.app/Contents/MacOS/afproxy.
+// By default, it auto-detects the afproxy path by probing the known installation locations for
+// both the subscription variant (/Applications/Strongbox.app) and the perpetual-license variant
+// (/Applications/Strongbox 2.app), falling back to the subscription path if neither is found.
 // Use WithProxyPath to specify a custom location.
 //
 // Example:
@@ -91,7 +115,7 @@ func NewClient(opts ...Option) (*Client, error) {
 		return nil, fmt.Errorf("generating keypair: %w", err)
 	}
 	c := &Client{
-		proxyPath:  defaultProxyPath,
+		proxyPath:  detectDefaultProxyPath(),
 		publicKey:  pub,
 		privateKey: priv,
 	}
