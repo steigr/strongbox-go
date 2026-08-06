@@ -17,6 +17,7 @@ var (
 	outputFormat         OutputFormat
 	terminalImageSupport TerminalImageSupport
 	helpMode             string
+	proxyPath            string
 )
 
 type TerminalImageSupport int
@@ -67,8 +68,13 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("unknown output format: %s", outputStr)
 		}
 
+		var opts []strongbox.Option
+		if proxyPath != "" {
+			opts = append(opts, strongbox.WithProxyPath(proxyPath))
+		}
+
 		var err error
-		client, err = strongbox.NewClient()
+		client, err = strongbox.NewClient(opts...)
 		if err != nil {
 			return fmt.Errorf("creating client: %v", err)
 		}
@@ -83,6 +89,7 @@ func init() {
 	rootCmd.PersistentFlags().IntVar(&skip, "skip", 0, "Number of results to skip")
 	rootCmd.PersistentFlags().IntVar(&take, "take", -1, "Number of results to take (-1 for all)")
 	rootCmd.PersistentFlags().StringP("output", "o", "pretty", "Output format (pretty/wide/json/yaml/csv/tsv)")
+	rootCmd.PersistentFlags().StringVar(&proxyPath, "proxy-path", "", "Path to the afproxy binary (overrides STRONGBOX_AFPROXY_PATH and auto-detection)")
 
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(searchCmd)

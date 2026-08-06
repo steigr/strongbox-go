@@ -15,8 +15,46 @@ A Go library and CLI for interfacing with [Strongbox](https://strongboxsafe.com)
 
 ## Requirements
 
-- macOS with [Strongbox](https://strongboxsafe.com) installed (`/Applications/Strongbox.app`)
+- macOS with [Strongbox](https://strongboxsafe.com) installed
 - Go 1.24+
+
+## Locating the afproxy binary
+
+strongbox-go talks to Strongbox through its native messaging host, `afproxy`. The path to this
+binary is resolved with the following priority:
+
+1. **Explicit path** — the `--proxy-path` CLI flag, or `strongbox.WithProxyPath(...)` in the library.
+2. **Environment variable** — `STRONGBOX_AFPROXY_PATH`, if set.
+3. **Auto-detection** — the following well-known installation paths are probed, in order, and the
+   first one that exists is used:
+   - `/Applications/Strongbox.app/Contents/MacOS/afproxy` (subscription / Mac App Store variant)
+   - `/Applications/Strongbox 2.app/Contents/MacOS/afproxy` (perpetual-license variant)
+   - `/Applications/Setapp/Strongbox.app/Contents/MacOS/afproxy-setapp` (Setapp variant)
+
+   If none of these exist, it falls back to the subscription path above.
+
+### Setting STRONGBOX_AFPROXY_PATH
+
+If your Strongbox installation lives somewhere else, set `STRONGBOX_AFPROXY_PATH` to the full path
+of the `afproxy` binary.
+
+**zsh / bash** (add to `~/.zshrc` or `~/.bashrc`):
+
+```bash
+export STRONGBOX_AFPROXY_PATH="/Applications/Strongbox 2.app/Contents/MacOS/afproxy"
+```
+
+**fish** (add to `~/.config/fish/config.fish`):
+
+```fish
+set -gx STRONGBOX_AFPROXY_PATH "/Applications/Strongbox 2.app/Contents/MacOS/afproxy"
+```
+
+Or use the `--proxy-path` flag for a one-off override:
+
+```bash
+strongbox --proxy-path "/Applications/Strongbox 2.app/Contents/MacOS/afproxy" status
+```
 
 ## Installation
 
@@ -231,6 +269,7 @@ strongbox icon <database-id> <node-id>
 All commands support global flags:
 - `-U, --unlock <true|false|try>`: Control automatic database unlocking (default: try).
 - `-o, --output <pretty|wide|json|yaml|csv|tsv>`: Output format (default: pretty).
+- `--proxy-path <path>`: Path to the afproxy binary (overrides `STRONGBOX_AFPROXY_PATH` and auto-detection). See [Locating the afproxy binary](#locating-the-afproxy-binary).
 
 ## Library Usage
 
