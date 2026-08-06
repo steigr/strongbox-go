@@ -23,9 +23,18 @@ const defaultProxyPath = "/Applications/Strongbox.app/Contents/MacOS/afproxy"
 // the subscription variant.
 const defaultProxyPathV2 = "/Applications/Strongbox 2.app/Contents/MacOS/afproxy"
 
+// defaultProxyPathSetapp is the installation path for afproxy as installed by the Setapp
+// distribution of Strongbox, which installs into /Applications/Setapp and ships the binary
+// under a "-setapp" suffix.
+const defaultProxyPathSetapp = "/Applications/Setapp/Strongbox.app/Contents/MacOS/afproxy-setapp"
+
 // defaultProxyPaths lists the known afproxy installation paths, in the order they are probed by
 // detectDefaultProxyPath.
-var defaultProxyPaths = []string{defaultProxyPath, defaultProxyPathV2}
+var defaultProxyPaths = []string{defaultProxyPath, defaultProxyPathV2, defaultProxyPathSetapp}
+
+// proxyPathEnvVar is the environment variable used to override the afproxy binary path.
+// It takes priority over auto-detection but is itself overridden by an explicit WithProxyPath option.
+const proxyPathEnvVar = "STRONGBOX_AFPROXY_PATH"
 
 // detectDefaultProxyPath returns the first afproxy installation path that exists on disk,
 // checking each entry in defaultProxyPaths in order. If none exist (e.g. Strongbox isn't
@@ -37,6 +46,16 @@ func detectDefaultProxyPath() string {
 		}
 	}
 	return defaultProxyPath
+}
+
+// resolveDefaultProxyPath determines the afproxy path to use when the caller hasn't supplied
+// an explicit WithProxyPath option: the STRONGBOX_AFPROXY_PATH environment variable takes
+// priority if set, otherwise it falls back to auto-detection via detectDefaultProxyPath.
+func resolveDefaultProxyPath() string {
+	if p := os.Getenv(proxyPathEnvVar); p != "" {
+		return p
+	}
+	return detectDefaultProxyPath()
 }
 
 // transport is the internal interface for sending a raw native-messaging request.
@@ -74,6 +93,7 @@ type Option func(*Client)
 
 // WithProxyPath sets a custom path to the afproxy binary.
 // This is useful when Strongbox is installed in a non-standard location or when testing.
+// It takes priority over both the STRONGBOX_AFPROXY_PATH environment variable and auto-detection.
 //
 // Example:
 //
@@ -91,10 +111,13 @@ func WithTransport(t transport) Option {
 // NewClient creates a new Strongbox client with the specified options.
 // It generates an ephemeral Curve25519 keypair for encrypting communication with the server.
 //
-// By default, it auto-detects the afproxy path by probing the known installation locations for
-// both the subscription variant (/Applications/Strongbox.app) and the perpetual-license variant
-// (/Applications/Strongbox 2.app), falling back to the subscription path if neither is found.
-// Use WithProxyPath to specify a custom location.
+// The afproxy path is resolved with the following priority:
+//  1. WithProxyPath, if given.
+//  2. The STRONGBOX_AFPROXY_PATH environment variable, if set.
+//  3. Auto-detection, which probes the known installation locations for the subscription
+//     variant (/Applications/Strongbox.app), the perpetual-license variant
+//     (/Applications/Strongbox 2.app), and the Setapp variant (/Applications/Setapp/Strongbox.app),
+//     falling back to the subscription path if none are found.
 //
 // Example:
 //
@@ -115,7 +138,7 @@ func NewClient(opts ...Option) (*Client, error) {
 		return nil, fmt.Errorf("generating keypair: %w", err)
 	}
 	c := &Client{
-		proxyPath:  detectDefaultProxyPath(),
+		proxyPath:  resolveDefaultProxyPath(),
 		publicKey:  pub,
 		privateKey: priv,
 	}

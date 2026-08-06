@@ -966,7 +966,7 @@ func TestTransportError(t *testing.T) {
 func TestNewClientDefaultTransport(t *testing.T) {
 	c, _ := NewClient()
 	at, ok := c.transport.(*afproxyTransport)
-	if !ok || at.proxyPath != detectDefaultProxyPath() {
+	if !ok || at.proxyPath != resolveDefaultProxyPath() {
 		t.Errorf("type=%T path=%v", c.transport, at)
 	}
 }
@@ -979,6 +979,41 @@ func TestWithProxyPath(t *testing.T) {
 	at := c.transport.(*afproxyTransport)
 	if at.proxyPath != "/x" {
 		t.Errorf("transport path=%q", at.proxyPath)
+	}
+}
+
+func TestDetectDefaultProxyPathKnownVariants(t *testing.T) {
+	want := []string{defaultProxyPath, defaultProxyPathV2, defaultProxyPathSetapp}
+	if len(defaultProxyPaths) != len(want) {
+		t.Fatalf("defaultProxyPaths=%v, want %v", defaultProxyPaths, want)
+	}
+	for i, p := range want {
+		if defaultProxyPaths[i] != p {
+			t.Errorf("defaultProxyPaths[%d]=%q, want %q", i, defaultProxyPaths[i], p)
+		}
+	}
+}
+
+func TestResolveDefaultProxyPathEnvVar(t *testing.T) {
+	t.Setenv(proxyPathEnvVar, "/env/afproxy")
+	if got := resolveDefaultProxyPath(); got != "/env/afproxy" {
+		t.Errorf("got %q, want /env/afproxy", got)
+	}
+}
+
+func TestNewClientUsesEnvVar(t *testing.T) {
+	t.Setenv(proxyPathEnvVar, "/env/afproxy")
+	c, _ := NewClient()
+	if c.proxyPath != "/env/afproxy" {
+		t.Errorf("got %q, want /env/afproxy", c.proxyPath)
+	}
+}
+
+func TestWithProxyPathOverridesEnvVar(t *testing.T) {
+	t.Setenv(proxyPathEnvVar, "/env/afproxy")
+	c, _ := NewClient(WithProxyPath("/explicit/afproxy"))
+	if c.proxyPath != "/explicit/afproxy" {
+		t.Errorf("got %q, want /explicit/afproxy", c.proxyPath)
 	}
 }
 
