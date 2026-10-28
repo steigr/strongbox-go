@@ -10,13 +10,14 @@ A Go library and CLI for interfacing with [Strongbox](https://strongboxsafe.com)
 - 🎲 **Password Generation**: Generate secure passwords using Strongbox's generator
 - 📋 **Clipboard Integration**: Copy credentials securely to clipboard
 - 🔒 **Database Management**: Lock and unlock databases
+- 🤖 **MCP Server**: Expose Strongbox to AI assistants via a stdio [Model Context Protocol](https://modelcontextprotocol.io) server
 - 🔄 **Concurrent-Safe**: Thread-safe client for concurrent operations
 - 📦 **Zero Dependencies**: Pure Go implementation with minimal external dependencies
 
 ## Requirements
 
 - macOS with [Strongbox](https://strongboxsafe.com) installed
-- Go 1.24+
+- Go 1.25+
 
 ## Locating the afproxy binary
 
@@ -270,6 +271,25 @@ All commands support global flags:
 - `-U, --unlock <true|false|try>`: Control automatic database unlocking (default: try).
 - `-o, --output <pretty|wide|json|yaml|csv|tsv>`: Output format (default: pretty).
 - `--proxy-path <path>`: Path to the afproxy binary (overrides `STRONGBOX_AFPROXY_PATH` and auto-detection). See [Locating the afproxy binary](#locating-the-afproxy-binary).
+
+### MCP Server
+
+`strongbox mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout, so AI assistants can search and use your Strongbox entries.
+
+```bash
+# Claude Code
+claude mcp add strongbox -- strongbox mcp
+```
+
+For other clients, add an `mcpServers` entry such as `{"command": "strongbox", "args": ["mcp"]}`.
+
+Tools: `status`, `search`, `get`, `get_url`, `groups`, `generate_password`, `password_strength`, `copy_field`, `create_entry`, `lock`, `unlock`.
+
+Secrets (passwords, TOTP codes and concealable custom fields) are redacted as `***` by default; `copy_field` puts one on the clipboard without the client ever seeing it. Flags:
+- `--reveal-secrets`: include secret values in tool results.
+- `--read-only`: omit `create_entry`, `lock` and `unlock`.
+
+The global `--unlock` and `--proxy-path` flags apply as well.
 
 ## Library Usage
 

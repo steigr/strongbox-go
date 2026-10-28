@@ -108,6 +108,7 @@ func init() {
 	rootCmd.AddCommand(iconCmd)
 	rootCmd.AddCommand(sshCmd)
 	rootCmd.AddCommand(sshAgentCmd)
+	rootCmd.AddCommand(mcpCmd)
 }
 
 func main() {
